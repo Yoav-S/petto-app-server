@@ -1,159 +1,246 @@
-SERVER LLM RULES (BACKEND LOGIC)
-These rules define how the LLM should behave when generating backend logic, API behavior, or system workflows.
+# PETTO — SERVER LLM RULES (BACKEND)
 
-1. Data Model Enforcement
-The LLM must always follow the exact schema:
+## 0. Core Principle
+This is NOT a complex system.
+This is a **simple, reliable data storage system for pet medical history**.
+
+Priorities:
+1. Data correctness
+2. Simplicity
+3. Predictability
+4. Security
+
+DO NOT:
+- Add unnecessary abstractions
+- Over-engineer logic
+- Add “smart AI features”
+
+---
+
+## 1. Data Model (STRICT)
+
+The LLM MUST follow this schema exactly.
 
 Users
-
-id
-
-email
-
-created_at
+- id
+- email
+- created_at
 
 Pets
-
-id
-
-user_id
-
-name
-
-type
-
-photo_url
-
-breed
-
-birth_date
-
-weight
-
-chip_id
-
-passport_number
-
-color
-
-is_neutered
-
-notes
-
-created_at
+- id
+- user_id
+- name
+- type
+- photo_url
+- breed
+- birth_date
+- weight
+- chip_id
+- passport_number
+- color
+- is_neutered
+- notes
+- created_at
 
 Vaccinations
+- id
+- pet_id
+- name
+- date
+- next_date
+- note
+- created_at
 
-id
-
-pet_id
-
-name
-
-date
-
-next_date
-
-note
-
-created_at
-
-Medical Records
-
-id
-
-pet_id
-
-type
-
-date
-
-description
-
-notes
-
-created_at
+MedicalRecords
+- id
+- pet_id
+- type
+- date
+- description
+- notes
+- created_at
 
 Notes
-
-id
-
-pet_id
-
-text
-
-created_at
+- id
+- pet_id
+- text
+- created_at
 
 Reminders
+- id
+- pet_id
+- type
+- title
+- date
+- status
+- note
+- created_at
 
-id
+DO NOT:
+- Rename fields
+- Add hidden fields
+- Add extra entities
 
-pet_id
+---
 
-type
+## 2. Relationships (MANDATORY)
 
-title
+- User → Pets (1:N)
+- Pet → all other entities (1:N)
 
-date
+Rules:
+- No orphan records
+- No cross-user access
+- Every query must validate ownership:
+  user_id → pet_id → entity_id
 
-status
+---
 
-note
+## 3. Core System Behavior
 
-created_at
+### 3.1 Reminder → Record Automation
 
-2. Relationship Rules
-The LLM must enforce:
+When reminder is marked as **completed**:
 
-User → Pets (1:N)
+IF type = "Vaccination"
+→ create Vaccination record
 
-Pet → all other entities (1:N)
+IF type = "Vet Visit"
+→ create MedicalRecord
 
-No orphan records
+IF type = "Medication" OR "Treatment"
+→ create MedicalRecord
 
-No cross‑user access
+This must happen automatically.
 
-3. Reminder Automation Rules
-When reminder is completed:
+---
 
-If type = Vaccination → create vaccination record
+### 3.2 Vaccination Logic
 
-If type = Vet Visit → create medical record
+When creating vaccination:
 
-If type = Medication/Treatment → create medical record
+- Accept:
+  name, date, optional next_date
 
-4. Vaccination Logic
-When adding vaccination:
+- IF next_date exists:
+  → auto-create Reminder
 
-Suggest next_date based on vaccine type (if known)
+- IF vaccine type is known:
+  → suggest next_date (do NOT enforce)
 
-If next_date exists → auto‑create reminder
+---
 
-5. Status Calculation Rules
-Server must calculate:
+### 3.3 Status Calculation (SERVER IS SOURCE OF TRUTH)
 
-Vaccination status
+Server MUST calculate:
 
-Reminder status transitions
+Vaccination:
+- Up to date
+- Due soon
+- Overdue
 
-6. API Behavior Rules
-Always return minimal required fields
+Reminder:
+- Scheduled
+- Today
+- Missed
+- Completed
 
-Never expose internal fields
+Client must NOT override server truth.
 
-Always validate pet_id ownership
+---
 
-Always return errors in allowed format:
+## 4. API Design Rules
 
-“Something went wrong”
+### 4.1 Response Principles
 
-“Failed to save”
+- Return ONLY required fields
+- Do NOT expose internal fields
+- Use consistent response shape
 
-“Check your connection”
+### 4.2 Errors (STRICT)
 
-7. Security Rules
-Never allow cross‑user data access
+Only allowed messages:
 
-Always validate user_id → pet_id → entity_id chain
+- "Something went wrong"
+- "Failed to save"
+- "Check your connection"
 
-No public endpoints without auth
+No custom backend messages.
+
+---
+
+### 4.3 Validation
+
+Always validate:
+- pet_id belongs to user
+- required fields exist
+- dates are valid
+
+Reject invalid data.
+
+---
+
+## 5. Security Rules (CRITICAL)
+
+- No cross-user access EVER
+- All endpoints require authentication
+- Validate ownership chain:
+  user → pet → entity
+
+- Never trust client input blindly
+
+---
+
+## 6. Data Philosophy
+
+The system exists to:
+
+- NEVER lose data
+- ALWAYS return consistent data
+- Be predictable for the user
+
+Do NOT:
+- Guess user intent
+- Auto-edit user data
+- Modify past records silently
+
+---
+
+## 7. Offline Support Logic
+
+- Accept delayed writes
+- Ensure idempotency
+- Avoid duplicate records
+
+---
+
+## 8. Performance Rules
+
+- Keep queries simple
+- Prefer indexed queries by:
+  pet_id
+  user_id
+  date
+
+- Avoid heavy joins / aggregations
+
+---
+
+## 9. What NOT to Build
+
+DO NOT implement:
+
+- Search
+- AI recommendations
+- Complex scheduling logic
+- Predictive features
+
+---
+
+## 10. Success Condition
+
+The backend is correct if:
+
+- Data is always accurate
+- User never loses information
+- System behaves predictably
