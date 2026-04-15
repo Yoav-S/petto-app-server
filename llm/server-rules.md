@@ -363,3 +363,74 @@ Tests are correct if:
 - invalid data is rejected
 - ownership is enforced
 - automation behaves predictably
+
+
+## 14. Environment Configuration (STRICT)
+
+The backend must use environment variables for all secrets and deployment-specific settings.
+
+The LLM MUST:
+
+- Create a dedicated configuration module
+- Read configuration from environment variables only
+- NEVER hardcode secrets
+- NEVER commit credentials into source files
+- Keep local development and production compatible
+
+---
+
+### Required environment variables
+
+- MONGODB_URI
+- MONGODB_DB_NAME
+- FIREBASE_PROJECT_ID
+- FIREBASE_CLIENT_EMAIL
+- FIREBASE_PRIVATE_KEY
+- PORT
+- APP_ENV
+- CLIENT_APP_URL
+
+Optional later:
+- STRIPE_PUBLISHABLE_KEY
+- STRIPE_SECRET_KEY
+- STRIPE_WEBHOOK_SECRET
+
+---
+
+### Rules
+
+- Use a single config entrypoint for environment loading
+- Validate required environment variables on startup
+- Fail fast if required variables are missing
+- Parse FIREBASE_PRIVATE_KEY correctly from escaped newline format
+- Keep Firebase Admin initialization in a dedicated config/service file
+- Keep MongoDB connection setup in a dedicated config/service file
+- Do NOT expose secrets in logs, responses, or error messages
+
+---
+
+### Firebase Admin Rules
+
+- Use FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY from env
+- Do NOT use a service account JSON file path in source code
+- Initialize Firebase Admin only once
+- Use Firebase Admin only on the server side
+
+---
+
+### MongoDB Rules
+
+- Use MONGODB_URI for connection
+- Use MONGODB_DB_NAME as the database selector
+- Do not hardcode database names in multiple files
+- Reuse a single database connection strategy
+
+---
+
+### Goal
+
+The backend configuration must be:
+- secure
+- centralized
+- easy to deploy locally and on Cloud Run
+- fully environment-driven
