@@ -13,7 +13,9 @@ Priorities:
 DO NOT:
 - Add unnecessary abstractions
 - Over-engineer logic
-- Add “smart AI features”
+- Add smart AI features
+- Add search or filtering systems
+- Add predictive behavior
 
 ---
 
@@ -100,7 +102,7 @@ Rules:
 
 ### 3.1 Reminder → Record Automation
 
-When reminder is marked as **completed**:
+When reminder is marked as completed:
 
 IF type = "Vaccination"
 → create Vaccination record
@@ -118,15 +120,9 @@ This must happen automatically.
 ### 3.2 Vaccination Logic
 
 When creating vaccination:
-
-- Accept:
-  name, date, optional next_date
-
-- IF next_date exists:
-  → auto-create Reminder
-
-- IF vaccine type is known:
-  → suggest next_date (do NOT enforce)
+- accept name, date, optional next_date
+- if next_date exists → auto-create Reminder
+- if vaccine type is known → suggest next_date, do not enforce
 
 ---
 
@@ -145,102 +141,146 @@ Reminder:
 - Missed
 - Completed
 
-Client must NOT override server truth.
+Client must not override server truth.
 
 ---
 
-## 4. API Design Rules
+## 4. Date and Time Rules
 
-### 4.1 Response Principles
+Server must enforce:
+- local-time-compatible date storage and interpretation
+- reminder default time = 09:00 when relevant
+- records use past dates
+- reminders use future dates
 
-- Return ONLY required fields
-- Do NOT expose internal fields
-- Use consistent response shape
+Date format displayed on client may vary, but server validation rules must enforce valid date semantics.
 
-### 4.2 Errors (STRICT)
+---
 
-Only allowed messages:
+## 5. Auth and Ownership Rules
 
+Auth flow assumptions:
+- email is required
+- account exists before protected data access
+- all protected operations require authenticated user identity
+- incomplete onboarding may produce authenticated user with incomplete pet data, but not unrestricted access to unrelated entities
+
+Server must always validate:
+- authenticated user
+- pet ownership
+- entity ownership chain
+
+---
+
+## 6. API Design Rules
+
+### 6.1 Response Principles
+- Return only required fields
+- Do not expose internal fields
+- Use consistent response shapes
+- Keep payloads lightweight
+
+### 6.2 Errors (STRICT)
+Only allowed user-facing messages:
 - "Something went wrong"
 - "Failed to save"
 - "Check your connection"
 
-No custom backend messages.
+No custom backend user-facing messages.
 
----
-
-### 4.3 Validation
-
+### 6.3 Validation
 Always validate:
 - pet_id belongs to user
 - required fields exist
 - dates are valid
+- text length max = 300 where applicable
 
 Reject invalid data.
 
 ---
 
-## 5. Security Rules (CRITICAL)
+## 7. Sorting Rules
 
-- No cross-user access EVER
-- All endpoints require authentication
-- Validate ownership chain:
-  user → pet → entity
+Default sorting:
+- Vaccinations → newest first
+- MedicalRecords → newest first
+- Notes → newest first
+- Reminders → Today, Scheduled, Missed, Completed
 
-- Never trust client input blindly
+Server should provide or support data in these expected orders where relevant.
 
 ---
 
-## 6. Data Philosophy
+## 8. Security Rules (CRITICAL)
+
+- No cross-user access ever
+- All endpoints require authentication
+- Validate ownership chain: user → pet → entity
+- Never trust client input blindly
+- Do not expose secrets
+- Do not expose internal implementation details
+
+---
+
+## 9. Data Philosophy
 
 The system exists to:
-
-- NEVER lose data
-- ALWAYS return consistent data
-- Be predictable for the user
+- never lose data
+- always return consistent data
+- remain predictable
+- support trust and recall
 
 Do NOT:
-- Guess user intent
-- Auto-edit user data
-- Modify past records silently
+- guess user intent
+- silently change records
+- modify past records automatically
+- auto-correct medical history without explicit user action
 
 ---
 
-## 7. Offline Support Logic
+## 10. Offline Support Logic
 
-- Accept delayed writes
-- Ensure idempotency
-- Avoid duplicate records
+Server must tolerate delayed synchronization.
+
+Rules:
+- accept delayed writes
+- ensure idempotency where possible
+- avoid duplicate records from repeated sync attempts
+- preserve consistency during reconnect scenarios
 
 ---
 
-## 8. Performance Rules
+## 11. Performance Rules
 
 - Keep queries simple
-- Prefer indexed queries by:
-  pet_id
-  user_id
-  date
-
-- Avoid heavy joins / aggregations
+- Prefer indexes by:
+  - pet_id
+  - user_id
+  - date
+- Avoid heavy joins
+- Avoid unnecessary aggregations
+- Avoid large over-fetched payloads
 
 ---
 
-## 9. What NOT to Build
+## 12. What NOT to Build
 
 DO NOT implement:
-
 - Search
+- Filters
 - AI recommendations
-- Complex scheduling logic
+- Complex scheduling engines
 - Predictive features
+- Analytics engines for MVP
+- Extra derived entities beyond the documented model
 
 ---
 
-## 10. Success Condition
+## 13. Success Condition
 
 The backend is correct if:
-
-- Data is always accurate
-- User never loses information
-- System behaves predictably
+- data is accurate
+- ownership is always enforced
+- reminders and records stay consistent
+- offline sync does not create confusing duplicates
+- the client receives predictable, minimal, trustworthy data
