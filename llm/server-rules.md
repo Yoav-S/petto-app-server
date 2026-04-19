@@ -19,6 +19,17 @@ DO NOT:
 
 ---
 
+## Technology Stack (STRICT)
+
+The LLM MUST follow this exact stack for the backend generation:
+- **Language**: Python 3
+- **Framework**: FastAPI (Async where appropriate)
+- **Deployment**: Google Cloud (Cloud Run)
+- **Database**: MongoDB
+- **Identity & Auth**: Firebase Admin SDK
+
+---
+
 ## 1. Data Model (STRICT)
 
 The LLM MUST follow this schema exactly.
@@ -390,11 +401,6 @@ The LLM MUST:
 - APP_ENV
 - CLIENT_APP_URL
 
-Optional later:
-- STRIPE_PUBLISHABLE_KEY
-- STRIPE_SECRET_KEY
-- STRIPE_WEBHOOK_SECRET
-
 ---
 
 ### Rules
@@ -434,3 +440,14 @@ The backend configuration must be:
 - centralized
 - easy to deploy locally and on Cloud Run
 - fully environment-driven
+
+---
+
+## 15. Payment Logic Rules (STRICT)
+
+We are building for iOS and Android only.
+
+### Backend Responsibility
+- **Normalize all payments into your system.**
+- **Handle tokens/subscriptions centrally.**
+- **Track payment source:** `ios` | `android`.
