@@ -400,6 +400,8 @@ The LLM MUST:
 - PORT
 - APP_ENV
 - CLIENT_APP_URL
+- DEEP_LINK_SCHEME
+- DEEP_LINK_DOMAIN
 
 ---
 
@@ -451,3 +453,15 @@ We are building for iOS and Android only.
 - **Normalize all payments into your system.**
 - **Handle tokens/subscriptions centrally.**
 - **Track payment source:** `ios` | `android`.
+
+---
+
+## 16. Deployment Rules (STRICT)
+
+The deployment strategy relies on Google Cloud Run via continuous deployment powered by Cloud Build. The repository contains a `Dockerfile` at the root directory (`/Dockerfile`) which acts as the build context.
+
+### Cloud Run Restrictions:
+- The server MUST listen for HTTP requests on the port specified by the `$PORT` environment variable (injected by Cloud Run).
+- A `Dockerfile` must ALWAYS be present in the repository root.
+- The `Dockerfile` must expose the port dynamically based on `$PORT` using the command (`CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}`).
+- The web app deployment should not rely on direct volume mounts for state since Cloud Run is stateless.
