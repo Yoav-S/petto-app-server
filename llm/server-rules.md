@@ -399,9 +399,6 @@ The LLM MUST:
 - FIREBASE_PRIVATE_KEY
 - PORT
 - APP_ENV
-- CLIENT_APP_URL
-- DEEP_LINK_SCHEME
-- DEEP_LINK_DOMAIN
 
 ---
 
@@ -465,3 +462,19 @@ The deployment strategy relies on Google Cloud Run via continuous deployment pow
 - A `Dockerfile` must ALWAYS be present in the repository root.
 - The `Dockerfile` must expose the port dynamically based on `$PORT` using the command (`CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}`).
 - The web app deployment should not rely on direct volume mounts for state since Cloud Run is stateless.
+
+---
+
+## 17. Image Storage Rules (STRICT)
+
+The system uses Firebase Cloud Storage for image management (e.g., pet avatars), utilizing a unified flow:
+
+### Flow Definition:
+1. **Who owns the image** -> Handled by Firebase Authentication.
+2. **Where the image is** -> Stored directly in Firebase Cloud Storage.
+3. **What the image is** -> The image URL/reference is stored in the MongoDB metadata (e.g., the `photo_url` field on the Pet entity).
+
+### Backend Responsibility:
+- The backend API accepts the image URL (or Cloud Storage reference) in the JSON payload when a client creates or updates an entity (like a Pet).
+- The backend stores this URL string in MongoDB.
+- The backend does NOT handle the actual file upload stream. The client uploads the file directly to Firebase Cloud Storage, obtains the download URL, and passes that URL to the backend.

@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// Craft rules based on the specific instructions for the app.
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Pets avatars / images
+    // Path structure: users/{userId}/pets/{petId}/{imageId}
+    match /users/{userId}/{allPaths=**} {
+      
+      // Allow read/write only if the user is authenticated and is accessing their own folder.
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Optional: limit file size to 5MB and enforce content-type to be an image
+      // allow write: if request.auth != null 
+      //              && request.auth.uid == userId
+      //              && request.resource.size < 5 * 1024 * 1024
+      //              && request.resource.contentType.matches('image/.*');
+    }
+
+    // Default deny for everything else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

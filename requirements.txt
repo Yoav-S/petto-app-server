@@ -1,7 +1,11 @@
 fastapi
-uvicorn
+uvicorn[standard]
 motor
 firebase-admin
 pydantic
 pydantic-settings
 python-dotenv
+httpx
+pytest
+pytest-asyncio
+mongomock
