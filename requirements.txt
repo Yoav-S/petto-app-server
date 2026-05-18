@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 motor
 firebase-admin
-pydantic
+pydantic[email]
 pydantic-settings
 python-dotenv
 httpx
