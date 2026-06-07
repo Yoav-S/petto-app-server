@@ -1,18 +1,16 @@
 """
-auth.py — Request/response models for registration and OTP verification.
+auth.py — Request/response models for passwordless email OTP auth.
 """
 from pydantic import BaseModel, EmailStr, Field
 
 
-class RegisterRequest(BaseModel):
+class SendOtpRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
 
 
 class VerifyOtpRequest(BaseModel):
     email: EmailStr
-    otp: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
-    password: str = Field(min_length=8, max_length=128)
+    otp: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
 class ResendOtpRequest(BaseModel):
@@ -21,3 +19,7 @@ class ResendOtpRequest(BaseModel):
 
 class AuthMessageResponse(BaseModel):
     message: str
+
+
+class VerifyOtpResponse(BaseModel):
+    custom_token: str

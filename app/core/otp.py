@@ -1,5 +1,5 @@
 """
-otp.py — 4-digit OTP generation and verification.
+otp.py — 6-digit OTP generation and verification.
 
 OTP codes are hashed before storage (same pattern as passwords).
 """
@@ -8,13 +8,14 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.security import hash_password, verify_password
 
-OTP_LENGTH = 4
+OTP_LENGTH = 6
 OTP_TTL_MINUTES = 10
 OTP_MAX_ATTEMPTS = 5
+OTP_RESEND_COOLDOWN_SECONDS = 20
 
 
 def generate_otp_code() -> str:
-    """Return a zero-padded 4-digit numeric OTP."""
+    """Return a zero-padded 6-digit numeric OTP."""
     return f"{secrets.randbelow(10 ** OTP_LENGTH):0{OTP_LENGTH}d}"
 
 
