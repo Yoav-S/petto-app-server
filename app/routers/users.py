@@ -1,11 +1,8 @@
 """
 users.py — /users/me endpoints.
 
-POST /users/me  — upsert user on first login (idempotent)
+POST /users/me  — upsert user on login (idempotent), update last_login_at
 GET  /users/me  — return current user profile
-
-The upsert pattern ensures that repeated calls (e.g. after reinstall)
-never create duplicate user records. The Firebase UID is the stable key.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -19,31 +16,84 @@ from app.models.user import UserOut
 router = APIRouter(prefix="/users", tags=["users"])
 
 
+def _infer_auth_provider(decoded_token: dict) -> str:
+    sign_in_provider = (
+        decoded_token.get("firebase", {}).get("sign_in_provider")
+        or decoded_token.get("sign_in_provider")
+    )
+    if sign_in_provider == "google.com":
+        return "google"
+    return "email"
+
+
+def _user_to_out(doc: dict) -> UserOut:
+    data = doc_to_dict(doc)
+    return UserOut(
+        id=data["id"],
+        email=data["email"],
+        auth_provider=data.get("auth_provider", "email"),
+        email_verified=data.get("email_verified", False),
+        created_at=data["created_at"],
+        last_login_at=data.get("last_login_at"),
+    )
+
+
 @router.post("/me", response_model=UserOut, status_code=200)
 async def upsert_user(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
-    Called after successful Firebase login.
-    Creates the user document if it does not exist yet; no-ops if it does.
-    Returns the user record in either case (idempotent).
+    Called after successful Firebase login (email or Google).
+    Creates the user document if missing; always updates last_login_at.
     """
     uid = current_user["uid"]
-    email = current_user["email"]
+    email = (current_user.get("email") or "").lower().strip()
+    auth_provider = _infer_auth_provider(current_user.get("token", {}))
+    now = datetime.now(timezone.utc)
 
     existing = await db.users.find_one({"firebase_uid": uid})
     if existing:
-        return UserOut(**doc_to_dict(existing))
+        await db.users.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {"last_login_at": now, "updated_at": now}},
+        )
+        existing["last_login_at"] = now
+        return _user_to_out(existing)
+
+    # Google (or first-time) handshake — link by email if pending signup exists
+    by_email = await db.users.find_one({"email": email}) if email else None
+    if by_email:
+        await db.users.update_one(
+            {"_id": by_email["_id"]},
+            {
+                "$set": {
+                    "firebase_uid": uid,
+                    "auth_provider": auth_provider,
+                    "email_verified": True if auth_provider == "google" else by_email.get("email_verified", False),
+                    "last_login_at": now,
+                    "updated_at": now,
+                },
+            },
+        )
+        by_email["firebase_uid"] = uid
+        by_email["auth_provider"] = auth_provider
+        by_email["last_login_at"] = now
+        return _user_to_out(by_email)
 
     doc = {
         "firebase_uid": uid,
         "email": email,
-        "created_at": datetime.now(timezone.utc),
+        "auth_provider": auth_provider,
+        "email_verified": auth_provider == "google",
+        "password_hash": None,
+        "created_at": now,
+        "last_login_at": now,
+        "updated_at": now,
     }
     result = await db.users.insert_one(doc)
     doc["_id"] = result.inserted_id
-    return UserOut(**doc_to_dict(doc))
+    return _user_to_out(doc)
 
 
 @router.get("/me", response_model=UserOut)
@@ -55,4 +105,4 @@ async def get_me(
     user = await db.users.find_one({"firebase_uid": current_user["uid"]})
     if not user:
         raise HTTPException(status_code=404, detail="Not found")
-    return UserOut(**doc_to_dict(user))
+    return _user_to_out(user)

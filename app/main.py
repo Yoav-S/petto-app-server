@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import connect_to_db, close_db_connection
 from app.core.firebase import initialize_firebase
-from app.routers import users, pets, vaccinations, medical_records, reminders
+from app.routers import users, pets, vaccinations, medical_records, reminders, auth
 
 
 @asynccontextmanager
@@ -44,6 +44,7 @@ app.add_middleware(
 
 # All protected routes live under /api/v1
 PREFIX = "/api/v1"
+app.include_router(auth.router, prefix=PREFIX)
 app.include_router(users.router, prefix=PREFIX)
 app.include_router(pets.router, prefix=PREFIX)
 app.include_router(vaccinations.router, prefix=PREFIX)

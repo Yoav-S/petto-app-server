@@ -20,10 +20,14 @@ _bearer = HTTPBearer()
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> dict:
-    """Verify Firebase ID token. Returns {uid, email} or raises HTTP 401."""
+    """Verify Firebase ID token. Returns {uid, email, token} or raises HTTP 401."""
     try:
         decoded = verify_firebase_token(credentials.credentials)
-        return {"uid": decoded["uid"], "email": decoded.get("email", "")}
+        return {
+            "uid": decoded["uid"],
+            "email": decoded.get("email", ""),
+            "token": decoded,
+        }
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -16,9 +16,15 @@ async def connect_to_db() -> None:
     """Open Motor client and create collection indexes."""
     global _client, _db
     _client = AsyncIOMotorClient(settings.MONGODB_URI)
-    _db = _client[settings.MONGODB_DB_NAME]
+    _db = _client[settings.mongodb_db_name]
 
-    # pets — look up by owner
+    # users — lookup by Firebase UID or email
+    await _db.users.create_index("firebase_uid", unique=True, sparse=True)
+    await _db.users.create_index("email", unique=True)
+
+    # email OTPs — one active OTP per email
+    await _db.email_otps.create_index("email", unique=True)
+    await _db.email_otps.create_index("expires_at", expireAfterSeconds=0)
     await _db.pets.create_index("user_id")
 
     # vaccinations — look up by pet, sort by date
