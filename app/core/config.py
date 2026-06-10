@@ -42,7 +42,12 @@ class Settings(BaseSettings):
 
     @property
     def smtp_configured(self) -> bool:
-        return bool(self.SMTP_HOST and self.SMTP_FROM_EMAIL)
+        return bool(
+            self.SMTP_HOST
+            and self.SMTP_FROM_EMAIL
+            and self.SMTP_USERNAME
+            and self.SMTP_PASSWORD
+        )
 
     # Automatically load from .env file for local development.
     # In Google Cloud (production), it will read directly from the environment variables.

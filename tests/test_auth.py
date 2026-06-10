@@ -38,6 +38,60 @@ def test_verify_otp_returns_custom_token(client):
     assert r.json()["custom_token"] == "custom-token-abc"
 
 
+def test_verify_otp_updates_mongo_user(client, mock_db):
+    with patch("app.routers.auth.send_otp_email") as send_otp:
+        with patch("app.routers.auth.firebase_auth.create_user") as create_user:
+            with patch("app.routers.auth.firebase_auth.create_custom_token") as custom_token:
+                create_user.return_value = MagicMock(uid="firebase_uid_verified")
+                custom_token.return_value = b"token"
+
+                client.post("/api/v1/auth/send-otp", json={"email": "mongo@test.com"})
+                otp_code = send_otp.call_args[0][1]
+
+                pending = mock_db.users._col.find_one({"email": "mongo@test.com"})
+                assert pending is not None
+                assert pending.get("email_verified") is False
+                assert "firebase_uid" not in pending
+
+                r = client.post(
+                    "/api/v1/auth/verify-otp",
+                    json={"email": "mongo@test.com", "otp": otp_code},
+                )
+                assert r.status_code == 200, r.text
+
+                verified = mock_db.users._col.find_one({"email": "mongo@test.com"})
+                assert verified["firebase_uid"] == "firebase_uid_verified"
+                assert verified["email_verified"] is True
+                assert verified["last_login_at"] is not None
+                assert mock_db.email_otps._col.find_one({"email": "mongo@test.com"}) is None
+
+
+def test_users_me_rejects_unverified_email_user(client, mock_db):
+    import asyncio
+
+    async def seed():
+        await mock_db.users.insert_one(
+            {
+                "firebase_uid": "uid_unverified",
+                "email": "pending@test.com",
+                "auth_provider": "email",
+                "email_verified": False,
+            }
+        )
+
+    asyncio.get_event_loop().run_until_complete(seed())
+
+    with patch("app.middleware.auth.verify_firebase_token") as verify:
+        verify.return_value = {
+            "uid": "uid_unverified",
+            "email": "pending@test.com",
+            "token": {"firebase": {"sign_in_provider": "custom"}},
+        }
+        r = client.post("/api/v1/users/me", headers={"Authorization": "Bearer any"})
+
+    assert r.status_code == 403
+
+
 def test_resend_otp_respects_cooldown(client):
     with patch("app.routers.auth.send_otp_email"):
         client.post("/api/v1/auth/send-otp", json={"email": "cooldown@test.com"})

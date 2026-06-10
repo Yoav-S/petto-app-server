@@ -15,6 +15,8 @@ from app.models.user import UserOut
 
 router = APIRouter(prefix="/users", tags=["users"])
 
+_GENERIC_ERROR = "Something went wrong"
+
 
 def _infer_auth_provider(decoded_token: dict) -> str:
     sign_in_provider = (
@@ -54,6 +56,8 @@ async def upsert_user(
 
     existing = await db.users.find_one({"firebase_uid": uid})
     if existing:
+        if existing.get("auth_provider") == "email" and not existing.get("email_verified", False):
+            raise HTTPException(status_code=403, detail=_GENERIC_ERROR)
         await db.users.update_one(
             {"_id": existing["_id"]},
             {"$set": {"last_login_at": now, "updated_at": now}},
@@ -64,13 +68,20 @@ async def upsert_user(
     # Google (or first-time) handshake — link by email if pending signup exists
     by_email = await db.users.find_one({"email": email}) if email else None
     if by_email:
+        email_verified = (
+            True
+            if auth_provider == "google"
+            else by_email.get("email_verified", False)
+        )
+        if auth_provider == "email" and not email_verified:
+            raise HTTPException(status_code=403, detail=_GENERIC_ERROR)
         await db.users.update_one(
             {"_id": by_email["_id"]},
             {
                 "$set": {
                     "firebase_uid": uid,
                     "auth_provider": auth_provider,
-                    "email_verified": True if auth_provider == "google" else by_email.get("email_verified", False),
+                    "email_verified": email_verified,
                     "last_login_at": now,
                     "updated_at": now,
                 },
@@ -86,7 +97,6 @@ async def upsert_user(
         "email": email,
         "auth_provider": auth_provider,
         "email_verified": auth_provider == "google",
-        "password_hash": None,
         "created_at": now,
         "last_login_at": now,
         "updated_at": now,

@@ -13,7 +13,7 @@ from firebase_admin.auth import EmailAlreadyExistsError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_database
-from app.core.email_service import send_otp_email
+from app.core.email_service import EmailDeliveryError, send_otp_email
 from app.core.otp import (
     OTP_MAX_ATTEMPTS,
     OTP_RESEND_COOLDOWN_SECONDS,
@@ -55,7 +55,10 @@ async def _store_and_send_otp(db: AsyncIOMotorDatabase, email: str) -> None:
         },
         upsert=True,
     )
-    send_otp_email(email, otp_code)
+    try:
+        send_otp_email(email, otp_code)
+    except EmailDeliveryError:
+        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
 
 
 def _check_resend_cooldown(otp_doc: dict | None) -> None:
