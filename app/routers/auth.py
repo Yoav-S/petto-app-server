@@ -84,19 +84,21 @@ async def send_otp(
     existing_otp = await db.email_otps.find_one({"email": email})
     _check_resend_cooldown(existing_otp)
 
-    user = await db.users.find_one({"email": email})
-    if not user:
-        await db.users.insert_one(
-            {
+    # Upsert pending user — do NOT set firebase_uid: null (unique sparse index
+    # only allows one null value and would 500 on the second signup).
+    await db.users.update_one(
+        {"email": email},
+        {
+            "$set": {
                 "email": email,
                 "auth_provider": "email",
                 "email_verified": False,
-                "firebase_uid": None,
-                "password_hash": None,
-                "created_at": now,
                 "updated_at": now,
-            }
-        )
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
 
     await _store_and_send_otp(db, email)
     return AuthMessageResponse(message=_RESEND_MESSAGE)

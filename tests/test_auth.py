@@ -10,6 +10,15 @@ def test_send_otp_creates_pending_user(client):
     assert len(send_otp.call_args[0][1]) == 6
 
 
+def test_send_otp_second_user_does_not_500(client):
+    """Regression: unique sparse firebase_uid index breaks on firebase_uid: null."""
+    with patch("app.routers.auth.send_otp_email"):
+        r1 = client.post("/api/v1/auth/send-otp", json={"email": "first@test.com"})
+        r2 = client.post("/api/v1/auth/send-otp", json={"email": "second@test.com"})
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+
+
 def test_verify_otp_returns_custom_token(client):
     with patch("app.routers.auth.send_otp_email") as send_otp:
         with patch("app.routers.auth.firebase_auth.create_user") as create_user:

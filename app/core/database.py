@@ -51,4 +51,6 @@ async def close_db_connection() -> None:
 
 def get_database() -> AsyncIOMotorDatabase:
     """FastAPI dependency — returns the active database handle."""
+    if _db is None:
+        raise RuntimeError("Database is not connected")
     return _db

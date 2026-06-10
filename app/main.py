@@ -8,9 +8,12 @@ Startup sequence:
 
 Health check at GET /health (unauthenticated) for Cloud Run probes.
 """
+import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+logger = logging.getLogger("petto")
 
 from app.core.database import connect_to_db, close_db_connection
 from app.core.firebase import initialize_firebase
@@ -41,6 +44,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    response = await call_next(request)
+    logger.info("%s %s -> %s", request.method, request.url.path, response.status_code)
+    return response
 
 # All protected routes live under /api/v1
 PREFIX = "/api/v1"
