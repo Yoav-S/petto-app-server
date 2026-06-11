@@ -5,7 +5,8 @@ POST /auth/send-otp    — signup + login: email only, sends 6-digit OTP
 POST /auth/verify-otp  — verify OTP, return Firebase custom token
 POST /auth/resend-otp  — resend OTP (20s cooldown)
 """
-from datetime import datetime, timezone, timedelta
+import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from firebase_admin import auth as firebase_auth
@@ -31,6 +32,7 @@ from app.models.auth import (
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 _GENERIC_ERROR = "Something went wrong"
 _RESEND_MESSAGE = "If this email is valid, a verification code was sent"
@@ -61,15 +63,26 @@ async def _store_and_send_otp(db: AsyncIOMotorDatabase, email: str) -> None:
         raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
 
 
-def _check_resend_cooldown(otp_doc: dict | None) -> None:
+def _resend_cooldown_remaining(otp_doc: dict | None) -> int | None:
     if not otp_doc or not otp_doc.get("last_sent_at"):
-        return
+        return None
     last_sent = otp_doc["last_sent_at"]
     if last_sent.tzinfo is None:
         last_sent = last_sent.replace(tzinfo=timezone.utc)
     elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
     if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
-        raise HTTPException(status_code=429, detail=_GENERIC_ERROR)
+        return max(1, int(OTP_RESEND_COOLDOWN_SECONDS - elapsed))
+    return None
+
+
+def _raise_resend_cooldown(otp_doc: dict | None) -> None:
+    remaining = _resend_cooldown_remaining(otp_doc)
+    if remaining is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=_GENERIC_ERROR,
+            headers={"Retry-After": str(remaining)},
+        )
 
 
 @router.post("/send-otp", response_model=AuthMessageResponse, status_code=status.HTTP_200_OK)
@@ -84,26 +97,33 @@ async def send_otp(
     email = body.email.lower().strip()
     now = datetime.now(timezone.utc)
 
-    existing_otp = await db.email_otps.find_one({"email": email})
-    _check_resend_cooldown(existing_otp)
+    try:
+        existing_otp = await db.email_otps.find_one({"email": email})
+        _raise_resend_cooldown(existing_otp)
 
-    # Upsert pending user — do NOT set firebase_uid: null (unique sparse index
-    # only allows one null value and would 500 on the second signup).
-    await db.users.update_one(
-        {"email": email},
-        {
-            "$set": {
-                "email": email,
-                "auth_provider": "email",
-                "email_verified": False,
-                "updated_at": now,
+        # Upsert pending user — do NOT set firebase_uid: null (unique sparse index
+        # only allows one null value and would 500 on the second signup).
+        await db.users.update_one(
+            {"email": email},
+            {
+                "$set": {
+                    "email": email,
+                    "auth_provider": "email",
+                    "email_verified": False,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {"created_at": now},
             },
-            "$setOnInsert": {"created_at": now},
-        },
-        upsert=True,
-    )
+            upsert=True,
+        )
 
-    await _store_and_send_otp(db, email)
+        await _store_and_send_otp(db, email)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("send-otp failed for %s", email)
+        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
+
     return AuthMessageResponse(message=_RESEND_MESSAGE)
 
 
@@ -141,35 +161,41 @@ async def verify_otp(
         await db.email_otps.update_one({"email": email}, {"$inc": {"attempts": 1}})
         raise HTTPException(status_code=400, detail=_GENERIC_ERROR)
 
-    firebase_uid = user.get("firebase_uid")
     try:
-        if firebase_uid:
-            firebase_auth.update_user(firebase_uid, email_verified=True)
-        else:
-            fb_user = firebase_auth.create_user(email=email, email_verified=True)
+        firebase_uid = user.get("firebase_uid")
+        try:
+            if firebase_uid:
+                firebase_auth.update_user(firebase_uid, email_verified=True)
+            else:
+                fb_user = firebase_auth.create_user(email=email, email_verified=True)
+                firebase_uid = fb_user.uid
+        except EmailAlreadyExistsError:
+            fb_user = firebase_auth.get_user_by_email(email)
+            firebase_auth.update_user(fb_user.uid, email_verified=True)
             firebase_uid = fb_user.uid
-    except EmailAlreadyExistsError:
-        fb_user = firebase_auth.get_user_by_email(email)
-        firebase_auth.update_user(fb_user.uid, email_verified=True)
-        firebase_uid = fb_user.uid
 
-    token_bytes = firebase_auth.create_custom_token(firebase_uid)
-    custom_token = token_bytes.decode("utf-8") if isinstance(token_bytes, bytes) else token_bytes
+        token_bytes = firebase_auth.create_custom_token(firebase_uid)
+        custom_token = token_bytes.decode("utf-8") if isinstance(token_bytes, bytes) else token_bytes
 
-    now = datetime.now(timezone.utc)
-    await db.users.update_one(
-        {"email": email},
-        {
-            "$set": {
-                "firebase_uid": firebase_uid,
-                "auth_provider": "email",
-                "email_verified": True,
-                "last_login_at": now,
-                "updated_at": now,
+        now = datetime.now(timezone.utc)
+        await db.users.update_one(
+            {"email": email},
+            {
+                "$set": {
+                    "firebase_uid": firebase_uid,
+                    "auth_provider": "email",
+                    "email_verified": True,
+                    "last_login_at": now,
+                    "updated_at": now,
+                },
             },
-        },
-    )
-    await db.email_otps.delete_one({"email": email})
+        )
+        await db.email_otps.delete_one({"email": email})
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("verify-otp failed for %s", email)
+        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
 
     return VerifyOtpResponse(custom_token=custom_token)
 
@@ -186,6 +212,12 @@ async def resend_otp(
     if not otp_doc:
         return AuthMessageResponse(message=_RESEND_MESSAGE)
 
-    _check_resend_cooldown(otp_doc)
-    await _store_and_send_otp(db, email)
+    _raise_resend_cooldown(otp_doc)
+    try:
+        await _store_and_send_otp(db, email)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("resend-otp failed for %s", email)
+        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
     return AuthMessageResponse(message=_RESEND_MESSAGE)
