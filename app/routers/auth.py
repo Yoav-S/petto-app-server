@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from firebase_admin import auth as firebase_auth
-from firebase_admin.auth import EmailAlreadyExistsError
+from firebase_admin.auth import EmailAlreadyExistsError, UserNotFoundError
+from google.auth.exceptions import RefreshError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_database
@@ -127,6 +128,23 @@ async def send_otp(
     return AuthMessageResponse(message=_RESEND_MESSAGE)
 
 
+def _ensure_firebase_user(email: str, firebase_uid: str | None) -> str:
+    """Create or update Firebase Auth user after OTP is verified."""
+    if firebase_uid:
+        try:
+            firebase_auth.update_user(firebase_uid, email=email, email_verified=True)
+            return firebase_uid
+        except UserNotFoundError:
+            firebase_uid = None
+
+    try:
+        return firebase_auth.create_user(email=email, email_verified=True).uid
+    except EmailAlreadyExistsError:
+        fb_user = firebase_auth.get_user_by_email(email)
+        firebase_auth.update_user(fb_user.uid, email_verified=True)
+        return fb_user.uid
+
+
 @router.post("/verify-otp", response_model=VerifyOtpResponse)
 async def verify_otp(
     body: VerifyOtpRequest,
@@ -159,20 +177,11 @@ async def verify_otp(
 
     if not verify_otp_code(body.otp, otp_doc["otp_hash"]):
         await db.email_otps.update_one({"email": email}, {"$inc": {"attempts": 1}})
+        logger.info("verify-otp rejected for %s (wrong or expired code)", email)
         raise HTTPException(status_code=400, detail=_GENERIC_ERROR)
 
     try:
-        firebase_uid = user.get("firebase_uid")
-        try:
-            if firebase_uid:
-                firebase_auth.update_user(firebase_uid, email_verified=True)
-            else:
-                fb_user = firebase_auth.create_user(email=email, email_verified=True)
-                firebase_uid = fb_user.uid
-        except EmailAlreadyExistsError:
-            fb_user = firebase_auth.get_user_by_email(email)
-            firebase_auth.update_user(fb_user.uid, email_verified=True)
-            firebase_uid = fb_user.uid
+        firebase_uid = _ensure_firebase_user(email, user.get("firebase_uid"))
 
         token_bytes = firebase_auth.create_custom_token(firebase_uid)
         custom_token = token_bytes.decode("utf-8") if isinstance(token_bytes, bytes) else token_bytes
@@ -191,6 +200,12 @@ async def verify_otp(
             },
         )
         await db.email_otps.delete_one({"email": email})
+    except RefreshError:
+        logger.exception(
+            "verify-otp Firebase auth failed for %s — invalid service account key on server",
+            email,
+        )
+        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
     except HTTPException:
         raise
     except Exception:

@@ -92,6 +92,27 @@ def test_users_me_rejects_unverified_email_user(client, mock_db):
     assert r.status_code == 403
 
 
+def test_verify_otp_accepts_leading_zero_code(client):
+    """OTP codes like 027485 must verify as strings, not lose a leading zero."""
+    with patch("app.routers.auth.send_otp_email") as send_otp:
+        with patch("app.routers.auth.generate_otp_code", return_value="027485"):
+            with patch("app.routers.auth.firebase_auth.create_user") as create_user:
+                with patch("app.routers.auth.firebase_auth.create_custom_token") as custom_token:
+                    create_user.return_value = MagicMock(uid="uid_leading_zero")
+                    custom_token.return_value = b"token-lz"
+
+                    client.post("/api/v1/auth/send-otp", json={"email": "leading@test.com"})
+                    send_otp.assert_called_with("leading@test.com", "027485")
+
+                    r = client.post(
+                        "/api/v1/auth/verify-otp",
+                        json={"email": "leading@test.com", "otp": "027485"},
+                    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["custom_token"] == "token-lz"
+
+
 def test_resend_otp_respects_cooldown(client):
     with patch("app.routers.auth.send_otp_email"):
         client.post("/api/v1/auth/send-otp", json={"email": "cooldown@test.com"})
