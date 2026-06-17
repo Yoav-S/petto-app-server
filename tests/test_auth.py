@@ -2,6 +2,23 @@
 from unittest.mock import patch, MagicMock
 
 
+def test_resend_sends_otp_email():
+    with patch("app.core.email_service.settings.RESEND_API_KEY", "re_test_key"):
+        with patch("app.core.email_service.settings.RESEND_FROM_EMAIL", "onboarding@resend.dev"):
+            with patch("app.core.email_service.httpx.post") as post:
+                post.return_value = MagicMock(status_code=200, json=lambda: {"id": "msg-abc"})
+                from app.core.email_service import send_otp_email
+
+                send_otp_email("user@test.com", "123456")
+
+                post.assert_called_once()
+                payload = post.call_args.kwargs["json"]
+                assert payload["from"] == "onboarding@resend.dev"
+                assert payload["to"] == ["user@test.com"]
+                assert "123456" in payload["text"]
+                assert "123456" in payload["html"]
+
+
 def test_send_otp_creates_pending_user(client):
     with patch("app.routers.auth.send_otp_email") as send_otp:
         r = client.post("/api/v1/auth/send-otp", json={"email": "new@test.com"})

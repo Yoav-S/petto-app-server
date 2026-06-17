@@ -20,34 +20,50 @@ class EmailDeliveryError(Exception):
     """Email send failed or email is not configured in production."""
 
 
-def _otp_email_content(otp_code: str) -> tuple[str, str]:
+def _otp_email_content(otp_code: str) -> tuple[str, str, str]:
     subject = "Your Petto verification code"
-    body = (
+    text = (
         f"Your Petto verification code is: {otp_code}\n\n"
         f"This code expires in 10 minutes.\n"
         f"If you did not request this, you can ignore this email."
     )
-    return subject, body
+    html = (
+        f"<p>Your Petto verification code is:</p>"
+        f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:6px;margin:16px 0\">"
+        f"{otp_code}</p>"
+        f"<p>This code expires in 10 minutes.</p>"
+        f"<p>If you did not request this, you can ignore this email.</p>"
+    )
+    return subject, text, html
 
 
-def _send_via_resend(to_email: str, subject: str, body: str) -> None:
+def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
+    api_key = settings.RESEND_API_KEY.strip()
+    from_email = settings.RESEND_FROM_EMAIL.strip()
     response = httpx.post(
         _RESEND_API_URL,
         headers={
-            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         json={
-            "from": settings.RESEND_FROM_EMAIL,
+            "from": from_email,
             "to": [to_email],
             "subject": subject,
-            "text": body,
+            "text": text,
+            "html": html,
         },
         timeout=30.0,
     )
     if response.status_code >= 400:
         logger.error("Resend API error %s: %s", response.status_code, response.text[:500])
         raise EmailDeliveryError("Resend send failed")
+    try:
+        message_id = response.json().get("id")
+    except Exception:
+        message_id = None
+    if message_id:
+        logger.info("Resend message id: %s", message_id)
 
 
 def _send_via_smtp(to_email: str, subject: str, body: str) -> None:
@@ -71,15 +87,15 @@ def _send_via_smtp(to_email: str, subject: str, body: str) -> None:
 
 def send_otp_email(to_email: str, otp_code: str) -> None:
     """Deliver a 6-digit OTP to the user's inbox."""
-    subject, body = _otp_email_content(otp_code)
+    subject, text, html = _otp_email_content(otp_code)
 
     if settings.resend_configured:
-        _send_via_resend(to_email, subject, body)
+        _send_via_resend(to_email, subject, text, html)
         logger.info("OTP email sent via Resend to %s", to_email)
         return
 
     if settings.smtp_configured:
-        _send_via_smtp(to_email, subject, body)
+        _send_via_smtp(to_email, subject, text)
         logger.info("OTP email sent via SMTP to %s", to_email)
         return
 
