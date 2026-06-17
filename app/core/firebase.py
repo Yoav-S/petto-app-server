@@ -27,21 +27,39 @@ _FIREBASE_SCOPES = [
 ]
 
 
+_BEGIN_PEM = "-----BEGIN PRIVATE KEY-----"
+_END_PEM = "-----END PRIVATE KEY-----"
+
+
 def normalize_private_key(raw: str) -> str:
     """Parse PEM private key from .env / Cloud Run (escaped or real newlines)."""
-    key = raw.strip()
+    if not raw or not raw.strip():
+        return ""
+
+    key = raw.strip().lstrip("\ufeff")
     if (key.startswith('"') and key.endswith('"')) or (key.startswith("'") and key.endswith("'")):
         key = key[1:-1].strip()
-    # Secret Manager may store literal \n or real line breaks — support both.
-    if "\\n" in key:
+
+    # Unescape literal \n (Secret Manager may double-escape as \\n).
+    while "\\n" in key:
         key = key.replace("\\n", "\n")
-    return key
+    key = key.replace("\r\n", "\n").replace("\r", "\n")
+
+    # If extra text before/after PEM, extract the block.
+    if not key.startswith(_BEGIN_PEM) and _BEGIN_PEM in key:
+        start = key.index(_BEGIN_PEM)
+        end = key.index(_END_PEM) + len(_END_PEM) if _END_PEM in key else len(key)
+        key = key[start:end]
+
+    return key.strip()
 
 
 def resolve_firebase_private_key() -> str:
     """Return PEM private key from FIREBASE_PRIVATE_KEY or FIREBASE_PRIVATE_KEY_BASE64."""
     if settings.FIREBASE_PRIVATE_KEY_BASE64.strip():
-        return base64.b64decode(settings.FIREBASE_PRIVATE_KEY_BASE64.strip()).decode("utf-8")
+        return normalize_private_key(
+            base64.b64decode(settings.FIREBASE_PRIVATE_KEY_BASE64.strip()).decode("utf-8")
+        )
     return normalize_private_key(settings.FIREBASE_PRIVATE_KEY)
 
 
@@ -62,7 +80,17 @@ def assert_firebase_credentials_valid() -> None:
     """
     info = build_firebase_service_account_info()
     private_key = info["private_key"]
-    if not private_key.startswith("-----BEGIN PRIVATE KEY-----"):
+    if not private_key:
+        raise RuntimeError(
+            "FIREBASE_PRIVATE_KEY is empty — check the secret is mounted on Cloud Run"
+        )
+    if not private_key.startswith(_BEGIN_PEM):
+        logger.error(
+            "FIREBASE_PRIVATE_KEY parse failed (length=%d, prefix=%r). "
+            "Secret must start with -----BEGIN PRIVATE KEY-----",
+            len(private_key),
+            private_key[:30],
+        )
         raise RuntimeError("FIREBASE_PRIVATE_KEY is not a valid PEM private key")
 
     creds = service_account.Credentials.from_service_account_info(info, scopes=_FIREBASE_SCOPES)
