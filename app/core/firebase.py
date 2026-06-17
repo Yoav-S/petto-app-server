@@ -28,11 +28,13 @@ _FIREBASE_SCOPES = [
 
 
 def normalize_private_key(raw: str) -> str:
-    """Parse PEM private key from .env / Cloud Run (escaped or quoted newlines)."""
+    """Parse PEM private key from .env / Cloud Run (escaped or real newlines)."""
     key = raw.strip()
     if (key.startswith('"') and key.endswith('"')) or (key.startswith("'") and key.endswith("'")):
-        key = key[1:-1]
-    key = key.replace("\\n", "\n")
+        key = key[1:-1].strip()
+    # Secret Manager may store literal \n or real line breaks — support both.
+    if "\\n" in key:
+        key = key.replace("\\n", "\n")
     return key
 
 
@@ -75,20 +77,17 @@ def initialize_firebase() -> None:
 
     try:
         assert_firebase_credentials_valid()
+        cred = credentials.Certificate(build_firebase_service_account_info())
+        _app = firebase_admin.initialize_app(cred)
+        logger.info("Firebase Admin initialized for project %s", settings.FIREBASE_PROJECT_ID)
     except Exception as exc:
+        # Never crash Cloud Run startup — keep /health and send-otp available.
         logger.error(
-            "Firebase Admin credentials are invalid (%s). Regenerate a key in "
-            "Firebase Console → Project settings → Service accounts → "
-            "Generate new private key, then update FIREBASE_PRIVATE_KEY "
-            "(or FIREBASE_PRIVATE_KEY_BASE64) on Cloud Run and in .env.",
+            "Firebase Admin failed to initialize (%s). "
+            "Fix FIREBASE_PRIVATE_KEY (or FIREBASE_PRIVATE_KEY_BASE64) and redeploy. "
+            "/auth/verify-otp will return errors until this is resolved.",
             exc,
         )
-        if settings.is_production:
-            raise RuntimeError("Firebase Admin credentials are invalid") from exc
-        logger.warning("Continuing in development — /auth/verify-otp will fail until credentials are fixed")
-
-    cred = credentials.Certificate(build_firebase_service_account_info())
-    _app = firebase_admin.initialize_app(cred)
 
 
 def verify_firebase_token(token: str) -> dict:
