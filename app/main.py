@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 logger = logging.getLogger("petto")
 
 from app.core.database import connect_to_db, close_db_connection
+from app.core.config import settings
 from app.core.firebase import initialize_firebase
 from app.routers import users, pets, vaccinations, medical_records, reminders, auth
 
@@ -25,6 +26,14 @@ async def lifespan(app: FastAPI):
     """Run startup tasks before serving, cleanup on shutdown."""
     await connect_to_db()
     initialize_firebase()
+    if settings.resend_configured:
+        logger.info("OTP email: Resend configured (from=%s)", settings.RESEND_FROM_EMAIL.strip())
+    elif settings.smtp_configured:
+        logger.info("OTP email: SMTP configured")
+    else:
+        logger.warning(
+            "OTP email: not configured — mount RESEND_API_KEY + RESEND_FROM_EMAIL on Cloud Run"
+        )
     yield
     await close_db_connection()
 
