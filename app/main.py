@@ -9,6 +9,7 @@ Startup sequence:
 Health check at GET /health (unauthenticated) for Cloud Run probes.
 """
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 logger = logging.getLogger("petto")
 
 from app.core.database import connect_to_db, close_db_connection
-from app.core.config import settings
 from app.core.firebase import initialize_firebase
+from app.core.gcp_secrets import resolve_resend_credentials
 from app.routers import users, pets, vaccinations, medical_records, reminders, auth
 
 
@@ -26,13 +27,22 @@ async def lifespan(app: FastAPI):
     """Run startup tasks before serving, cleanup on shutdown."""
     await connect_to_db()
     initialize_firebase()
-    if settings.resend_configured:
-        logger.info("OTP email: Resend configured (from=%s)", settings.RESEND_FROM_EMAIL.strip())
-    elif settings.smtp_configured:
-        logger.info("OTP email: SMTP configured")
+    resend_key, resend_from, source = resolve_resend_credentials()
+    if resend_key and resend_from:
+        logger.info(
+            "OTP email: Resend configured (from=%s, source=%s)",
+            resend_from,
+            source,
+        )
     else:
+        key_raw = os.environ.get("RESEND_API_KEY", "")
+        from_raw = os.environ.get("RESEND_FROM_EMAIL", "")
         logger.warning(
-            "OTP email: not configured — mount RESEND_API_KEY + RESEND_FROM_EMAIL on Cloud Run"
+            "OTP email: not configured — RESEND_API_KEY env len=%d, "
+            "RESEND_FROM_EMAIL env=%r. Add secrets RESEND_API_KEY and "
+            "RESEND_FROM_EMAIL in Secret Manager.",
+            len(key_raw.strip()),
+            from_raw.strip()[:80] if from_raw else "",
         )
     yield
     await close_db_connection()

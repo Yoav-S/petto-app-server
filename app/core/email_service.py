@@ -9,7 +9,7 @@ from email.message import EmailMessage
 
 import httpx
 
-from app.core.config import settings
+from app.core.gcp_secrets import resolve_resend_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,14 @@ def _otp_email_content(otp_code: str) -> tuple[str, str, str]:
     return subject, text, html
 
 
-def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
-    api_key = settings.RESEND_API_KEY.strip()
-    from_email = settings.RESEND_FROM_EMAIL.strip()
+def _send_via_resend(
+    to_email: str,
+    subject: str,
+    text: str,
+    html: str,
+    api_key: str,
+    from_email: str,
+) -> None:
     response = httpx.post(
         _RESEND_API_URL,
         headers={
@@ -67,6 +72,8 @@ def _send_via_resend(to_email: str, subject: str, text: str, html: str) -> None:
 
 
 def _send_via_smtp(to_email: str, subject: str, body: str) -> None:
+    from app.core.config import settings
+
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.SMTP_FROM_EMAIL
@@ -89,10 +96,13 @@ def send_otp_email(to_email: str, otp_code: str) -> None:
     """Deliver a 6-digit OTP to the user's inbox."""
     subject, text, html = _otp_email_content(otp_code)
 
-    if settings.resend_configured:
-        _send_via_resend(to_email, subject, text, html)
+    resend_key, resend_from, _source = resolve_resend_credentials()
+    if resend_key and resend_from:
+        _send_via_resend(to_email, subject, text, html, resend_key, resend_from)
         logger.info("OTP email sent via Resend to %s", to_email)
         return
+
+    from app.core.config import settings
 
     if settings.smtp_configured:
         _send_via_smtp(to_email, subject, text)
@@ -100,7 +110,7 @@ def send_otp_email(to_email: str, otp_code: str) -> None:
         return
 
     hint = (
-        "set RESEND_API_KEY + RESEND_FROM_EMAIL, or SMTP_* vars on Cloud Run"
+        "add RESEND_API_KEY + RESEND_FROM_EMAIL to Secret Manager (or Cloud Run env)"
         if settings.is_production
         else "dev only"
     )
