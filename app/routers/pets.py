@@ -7,12 +7,13 @@ All reads filter by user_id = current_user["uid"].
 DELETE cascades — removing a pet removes all child data:
   vaccinations, medical_records, health_notes, reminders.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime, timezone
 
 from app.core.database import get_database
+from app.core.errors import ErrorCode, raise_api_error
 from app.core.utils import doc_to_dict, validate_pet_ownership
 from app.middleware.auth import get_current_user
 from app.models.pet import PetCreate, PetUpdate, PetOut
@@ -90,7 +91,7 @@ async def update_pet(
 
     updates = body.model_dump(exclude_unset=True)
     if not updates:
-        raise HTTPException(status_code=422, detail="No fields to update")
+        raise_api_error(422, ErrorCode.NO_FIELDS_TO_UPDATE)
 
     await db.pets.update_one(
         {"_id": ObjectId(pet_id)},

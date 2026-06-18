@@ -16,6 +16,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.database import get_database
 from app.core.email_service import EmailDeliveryError, send_otp_email
+from app.core.errors import ErrorCode, raise_api_error
 from app.core.otp import (
     OTP_MAX_ATTEMPTS,
     OTP_RESEND_COOLDOWN_SECONDS,
@@ -35,7 +36,6 @@ from app.models.auth import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
 
-_GENERIC_ERROR = "Something went wrong"
 _RESEND_MESSAGE = "If this email is valid, a verification code was sent"
 
 
@@ -61,7 +61,7 @@ async def _store_and_send_otp(db: AsyncIOMotorDatabase, email: str) -> None:
     try:
         send_otp_email(email, otp_code)
     except EmailDeliveryError:
-        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
+        raise_api_error(500, ErrorCode.EMAIL_SEND_FAILED)
 
 
 def _resend_cooldown_remaining(otp_doc: dict | None) -> int | None:
@@ -79,9 +79,9 @@ def _resend_cooldown_remaining(otp_doc: dict | None) -> int | None:
 def _raise_resend_cooldown(otp_doc: dict | None) -> None:
     remaining = _resend_cooldown_remaining(otp_doc)
     if remaining is not None:
-        raise HTTPException(
-            status_code=429,
-            detail=_GENERIC_ERROR,
+        raise_api_error(
+            429,
+            ErrorCode.OTP_RESEND_COOLDOWN,
             headers={"Retry-After": str(remaining)},
         )
 
@@ -102,8 +102,6 @@ async def send_otp(
         existing_otp = await db.email_otps.find_one({"email": email})
         _raise_resend_cooldown(existing_otp)
 
-        # Upsert pending user — do NOT set firebase_uid: null (unique sparse index
-        # only allows one null value and would 500 on the second signup).
         await db.users.update_one(
             {"email": email},
             {
@@ -123,7 +121,7 @@ async def send_otp(
         raise
     except Exception:
         logger.exception("send-otp failed for %s", email)
-        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
+        raise_api_error(500, ErrorCode.CHECK_CONNECTION)
 
     return AuthMessageResponse(message=_RESEND_MESSAGE)
 
@@ -159,26 +157,26 @@ async def verify_otp(
 
     user = await db.users.find_one({"email": email})
     if not user:
-        raise HTTPException(status_code=400, detail=_GENERIC_ERROR)
+        raise_api_error(400, ErrorCode.OTP_INVALID)
 
     otp_doc = await db.email_otps.find_one({"email": email})
     if not otp_doc:
-        raise HTTPException(status_code=400, detail=_GENERIC_ERROR)
+        raise_api_error(400, ErrorCode.OTP_INVALID)
 
     if otp_doc.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
-        raise HTTPException(status_code=429, detail=_GENERIC_ERROR)
+        raise_api_error(429, ErrorCode.OTP_TOO_MANY_ATTEMPTS)
 
     expires_at = otp_doc.get("expires_at")
     if expires_at:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at < datetime.now(timezone.utc):
-            raise HTTPException(status_code=400, detail=_GENERIC_ERROR)
+            raise_api_error(400, ErrorCode.OTP_EXPIRED)
 
     if not verify_otp_code(body.otp, otp_doc["otp_hash"]):
         await db.email_otps.update_one({"email": email}, {"$inc": {"attempts": 1}})
-        logger.info("verify-otp rejected for %s (wrong or expired code)", email)
-        raise HTTPException(status_code=400, detail=_GENERIC_ERROR)
+        logger.info("verify-otp rejected for %s (wrong code)", email)
+        raise_api_error(400, ErrorCode.OTP_INVALID)
 
     try:
         firebase_uid = _ensure_firebase_user(email, user.get("firebase_uid"))
@@ -201,16 +199,13 @@ async def verify_otp(
         )
         await db.email_otps.delete_one({"email": email})
     except RefreshError:
-        logger.exception(
-            "verify-otp Firebase auth failed for %s — invalid service account key on server",
-            email,
-        )
-        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
+        logger.exception("verify-otp Firebase auth failed for %s", email)
+        raise_api_error(500, ErrorCode.CHECK_CONNECTION)
     except HTTPException:
         raise
     except Exception:
         logger.exception("verify-otp failed for %s", email)
-        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
+        raise_api_error(500, ErrorCode.GENERIC)
 
     return VerifyOtpResponse(custom_token=custom_token)
 
@@ -234,5 +229,6 @@ async def resend_otp(
         raise
     except Exception:
         logger.exception("resend-otp failed for %s", email)
-        raise HTTPException(status_code=500, detail=_GENERIC_ERROR) from None
+        raise_api_error(500, ErrorCode.CHECK_CONNECTION)
+
     return AuthMessageResponse(message=_RESEND_MESSAGE)

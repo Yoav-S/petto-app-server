@@ -10,6 +10,10 @@ from typing import Any, Optional
 from bson import ObjectId
 from fastapi import HTTPException
 
+from app.core.errors import ErrorCode
+
+_NOT_FOUND = {"code": ErrorCode.NOT_FOUND.value}
+
 
 # ---------------------------------------------------------------------------
 # MongoDB helpers
@@ -51,10 +55,10 @@ async def validate_pet_ownership(pet_id: str, uid: str, db) -> dict:
     to an unauthorized caller.
     """
     if not is_valid_object_id(pet_id):
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
     pet = await db.pets.find_one({"_id": ObjectId(pet_id)})
     if not pet or pet.get("user_id") != uid:
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
     return pet
 
 
@@ -70,10 +74,10 @@ async def validate_entity_ownership(
     Returns the raw entity document.
     """
     if not is_valid_object_id(entity_id):
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
     entity = await db[collection_name].find_one({"_id": ObjectId(entity_id)})
     if not entity or entity.get(parent_field) != pet_id:
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
     return entity
 
 

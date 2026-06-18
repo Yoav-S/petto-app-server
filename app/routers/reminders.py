@@ -13,7 +13,8 @@ Deleting a reminder does NOT delete linked HealthNotes — the note keeps
 the linked_reminder_id as a historical reference (the reminder display
 will simply not resolve). This is intentional: notes are the primary record.
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
+from app.core.errors import ErrorCode, raise_api_error
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime, timezone
@@ -131,7 +132,7 @@ async def update_reminder(
 
     updates = body.model_dump(exclude_unset=True)
     if not updates:
-        raise HTTPException(status_code=422, detail="No fields to update")
+        raise_api_error(422, ErrorCode.NO_FIELDS_TO_UPDATE)
 
     await db.reminders.update_one(
         {"_id": ObjectId(reminder_id)}, {"$set": updates}

@@ -12,6 +12,7 @@ No user-facing error message is exposed (server-rules §6.2).
 """
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.core.errors import ErrorCode, raise_api_error
 from app.core.firebase import verify_firebase_token
 
 _bearer = HTTPBearer()
@@ -29,7 +30,4 @@ async def get_current_user(
             "token": decoded,
         }
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
+        raise_api_error(401, ErrorCode.INVALID_TOKEN)

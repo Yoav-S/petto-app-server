@@ -13,9 +13,9 @@ from app.core.utils import doc_to_dict
 from app.middleware.auth import get_current_user
 from app.models.user import UserOut
 
-router = APIRouter(prefix="/users", tags=["users"])
+from app.core.errors import ErrorCode, raise_api_error
 
-_GENERIC_ERROR = "Something went wrong"
+router = APIRouter(prefix="/users", tags=["users"])
 
 
 def _infer_auth_provider(decoded_token: dict) -> str:
@@ -57,7 +57,7 @@ async def upsert_user(
     existing = await db.users.find_one({"firebase_uid": uid})
     if existing:
         if existing.get("auth_provider") == "email" and not existing.get("email_verified", False):
-            raise HTTPException(status_code=403, detail=_GENERIC_ERROR)
+            raise_api_error(403, ErrorCode.EMAIL_NOT_VERIFIED)
         await db.users.update_one(
             {"_id": existing["_id"]},
             {"$set": {"last_login_at": now, "updated_at": now}},
@@ -74,7 +74,7 @@ async def upsert_user(
             else by_email.get("email_verified", False)
         )
         if auth_provider == "email" and not email_verified:
-            raise HTTPException(status_code=403, detail=_GENERIC_ERROR)
+            raise_api_error(403, ErrorCode.EMAIL_NOT_VERIFIED)
         await db.users.update_one(
             {"_id": by_email["_id"]},
             {
@@ -114,5 +114,5 @@ async def get_me(
     """Return the current user's profile."""
     user = await db.users.find_one({"firebase_uid": current_user["uid"]})
     if not user:
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=404, detail={"code": ErrorCode.NOT_FOUND.value})
     return _user_to_out(user)

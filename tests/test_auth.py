@@ -109,6 +109,7 @@ def test_users_me_rejects_unverified_email_user(client, mock_db):
         r = client.post("/api/v1/users/me", headers={"Authorization": "Bearer any"})
 
     assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "email_not_verified"
 
 
 def test_verify_otp_accepts_leading_zero_code(client):
@@ -137,6 +138,18 @@ def test_resend_otp_respects_cooldown(client):
         client.post("/api/v1/auth/send-otp", json={"email": "cooldown@test.com"})
         r2 = client.post("/api/v1/auth/resend-otp", json={"email": "cooldown@test.com"})
     assert r2.status_code == 429
+    assert r2.json()["detail"]["code"] == "otp_resend_cooldown"
+
+
+def test_verify_otp_wrong_code_returns_otp_invalid(client):
+    with patch("app.routers.auth.send_otp_email"):
+        client.post("/api/v1/auth/send-otp", json={"email": "wrong@test.com"})
+        r = client.post(
+            "/api/v1/auth/verify-otp",
+            json={"email": "wrong@test.com", "otp": "000000"},
+        )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "otp_invalid"
 
 
 def test_users_me_updates_last_login(client):

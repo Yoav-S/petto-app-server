@@ -19,7 +19,8 @@ Design notes:
     linked_reminder_time for the home screen / list cards.
   - All notes deleted when parent record is deleted (cascade).
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
+from app.core.errors import ErrorCode, raise_api_error
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime, timezone
@@ -194,7 +195,7 @@ async def update_medical_record_status(
     record = await validate_entity_ownership("medical_records", record_id, pet_id, db)
 
     if record.get("status") == "resolved":
-        raise HTTPException(status_code=422, detail="Already resolved")
+        raise_api_error(422, ErrorCode.ALREADY_RESOLVED)
 
     now = datetime.now(timezone.utc)
     await db.medical_records.update_one(
@@ -289,7 +290,7 @@ async def update_note(
         await validate_entity_ownership("reminders", new_linked, pet_id, db)
 
     if not updates:
-        raise HTTPException(status_code=422, detail="No fields to update")
+        raise_api_error(422, ErrorCode.NO_FIELDS_TO_UPDATE)
 
     await db.health_notes.update_one(
         {"_id": ObjectId(note_id)}, {"$set": updates}

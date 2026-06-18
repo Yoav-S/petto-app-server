@@ -8,7 +8,8 @@ Key behaviors:
   - Sorted newest first by date.
   - Ownership chain validated: uid → pet_id → vaccination_id.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from app.core.errors import ErrorCode, raise_api_error
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime, timezone
@@ -126,7 +127,7 @@ async def update_vaccination(
 
     updates = body.model_dump(exclude_unset=True)
     if not updates:
-        raise HTTPException(status_code=422, detail="No fields to update")
+        raise_api_error(422, ErrorCode.NO_FIELDS_TO_UPDATE)
 
     await db.vaccinations.update_one(
         {"_id": ObjectId(vaccination_id)}, {"$set": updates}
