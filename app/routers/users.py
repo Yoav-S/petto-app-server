@@ -28,7 +28,7 @@ def _infer_auth_provider(decoded_token: dict) -> str:
     return "email"
 
 
-def _user_to_out(doc: dict) -> UserOut:
+def _user_to_out(doc: dict, has_pets: bool = False) -> UserOut:
     data = doc_to_dict(doc)
     return UserOut(
         id=data["id"],
@@ -37,7 +37,14 @@ def _user_to_out(doc: dict) -> UserOut:
         email_verified=data.get("email_verified", False),
         created_at=data["created_at"],
         last_login_at=data.get("last_login_at"),
+        has_pets=has_pets,
     )
+
+
+async def _user_has_pets(uid: str, db: AsyncIOMotorDatabase) -> bool:
+    """Return True if the user owns at least one pet (post-login routing signal)."""
+    pet = await db.pets.find_one({"user_id": uid}, {"_id": 1})
+    return pet is not None
 
 
 @router.post("/me", response_model=UserOut, status_code=200)
@@ -53,6 +60,7 @@ async def upsert_user(
     email = (current_user.get("email") or "").lower().strip()
     auth_provider = _infer_auth_provider(current_user.get("token", {}))
     now = datetime.now(timezone.utc)
+    has_pets = await _user_has_pets(uid, db)
 
     existing = await db.users.find_one({"firebase_uid": uid})
     if existing:
@@ -63,7 +71,7 @@ async def upsert_user(
             {"$set": {"last_login_at": now, "updated_at": now}},
         )
         existing["last_login_at"] = now
-        return _user_to_out(existing)
+        return _user_to_out(existing, has_pets)
 
     # Google (or first-time) handshake — link by email if pending signup exists
     by_email = await db.users.find_one({"email": email}) if email else None
@@ -90,7 +98,7 @@ async def upsert_user(
         by_email["firebase_uid"] = uid
         by_email["auth_provider"] = auth_provider
         by_email["last_login_at"] = now
-        return _user_to_out(by_email)
+        return _user_to_out(by_email, has_pets)
 
     doc = {
         "firebase_uid": uid,
@@ -103,7 +111,7 @@ async def upsert_user(
     }
     result = await db.users.insert_one(doc)
     doc["_id"] = result.inserted_id
-    return _user_to_out(doc)
+    return _user_to_out(doc, has_pets)
 
 
 @router.get("/me", response_model=UserOut)
@@ -115,4 +123,5 @@ async def get_me(
     user = await db.users.find_one({"firebase_uid": current_user["uid"]})
     if not user:
         raise HTTPException(status_code=404, detail={"code": ErrorCode.NOT_FOUND.value})
-    return _user_to_out(user)
+    has_pets = await _user_has_pets(current_user["uid"], db)
+    return _user_to_out(user, has_pets)

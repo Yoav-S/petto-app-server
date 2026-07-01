@@ -16,3 +16,7 @@ class UserOut(BaseModel):
     email_verified: bool
     created_at: datetime
     last_login_at: Optional[datetime] = None
+    # Source of truth for post-login routing:
+    #   has_pets == True  → returning user, go straight into the app
+    #   has_pets == False → send to onboarding to add the first pet
+    has_pets: bool = False
