@@ -71,6 +71,7 @@ class MedicalRecordOut(BaseModel):
     # Preview fields for list cards (populated server-side)
     latest_note_preview: Optional[str] = None   # first 100 chars of latest note
     linked_reminder_time: Optional[str] = None  # "HH:MM" from latest note's reminder
+    updated_at: Optional[datetime] = None        # latest note time (for "Updated …" label)
 
 
 class MedicalRecordDetailOut(MedicalRecordOut):

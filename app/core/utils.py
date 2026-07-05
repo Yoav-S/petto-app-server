@@ -109,7 +109,9 @@ def compute_vaccination_status(next_date_str: Optional[str]) -> str:
     return "up_to_date"
 
 
-def compute_reminder_status(reminder_date_str: str, stored_status: str) -> str:
+def compute_reminder_status(
+    reminder_date_str: str, stored_status: str, today_str: Optional[str] = None
+) -> str:
     """
     Compute the reminder status to return in API responses.
 
@@ -119,6 +121,9 @@ def compute_reminder_status(reminder_date_str: str, stored_status: str) -> str:
     Returned status (what the client sees):
       "today" | "scheduled" | "missed" | "completed"
 
+    today_str is the caller's "today" ("YYYY-MM-DD") — pass the user's local
+    date so day boundaries match their timezone. Falls back to the server date.
+
     Logic:
       - completed / missed → always return stored value (user explicitly set these)
       - scheduled + date < today → auto "missed" (date passed without action)
@@ -127,7 +132,8 @@ def compute_reminder_status(reminder_date_str: str, stored_status: str) -> str:
     """
     if stored_status in ("completed", "missed"):
         return stored_status
-    today_str = date.today().isoformat()
+    if today_str is None:
+        today_str = date.today().isoformat()
     if reminder_date_str < today_str:
         return "missed"
     if reminder_date_str == today_str:
@@ -135,7 +141,7 @@ def compute_reminder_status(reminder_date_str: str, stored_status: str) -> str:
     return "scheduled"
 
 
-def build_reminder_tab_query(pet_id: str, tab: str) -> dict:
+def build_reminder_tab_query(pet_id: str, tab: str, today_str: Optional[str] = None) -> dict:
     """
     Build a MongoDB filter dict for the reminders tab endpoint.
 
@@ -143,8 +149,11 @@ def build_reminder_tab_query(pet_id: str, tab: str) -> dict:
     upcoming → date >  today, stored_status == "scheduled"
     recent   → stored_status in [completed, missed]
                OR (date < today AND status == "scheduled")  ← auto-missed
+
+    today_str should be the user's local date; falls back to the server date.
     """
-    today_str = date.today().isoformat()
+    if today_str is None:
+        today_str = date.today().isoformat()
     base = {"pet_id": pet_id}
 
     if tab == "today":

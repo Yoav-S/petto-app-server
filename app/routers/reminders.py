@@ -20,6 +20,7 @@ from bson import ObjectId
 from datetime import datetime, timezone
 
 from app.core.database import get_database
+from app.core.scheduling import resolve_timezone
 from app.core.utils import (
     doc_to_dict,
     validate_pet_ownership,
@@ -38,13 +39,20 @@ from app.models.reminder import (
 router = APIRouter(prefix="/pets/{pet_id}/reminders", tags=["reminders"])
 
 
-def _enrich(doc: dict) -> ReminderOut:
-    """Attach server-computed status to a reminder document."""
+def _enrich(doc: dict, today_str: str | None = None) -> ReminderOut:
+    """Attach server-computed status to a reminder document (in the user's tz)."""
     d = doc_to_dict(doc)
     d["status"] = compute_reminder_status(
-        d.get("date", ""), d.get("status", "scheduled")
+        d.get("date", ""), d.get("status", "scheduled"), today_str
     )
     return ReminderOut(**d)
+
+
+async def _user_today_str(uid: str, db: AsyncIOMotorDatabase) -> str:
+    """Return the user's current local date ('YYYY-MM-DD') from their stored timezone."""
+    user = await db.users.find_one({"firebase_uid": uid})
+    tz = resolve_timezone((user or {}).get("timezone"))
+    return datetime.now(tz).date().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -65,10 +73,11 @@ async def list_reminders(
       recent         → most recent first (date DESC)
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
-    query = build_reminder_tab_query(pet_id, tab)
+    today_str = await _user_today_str(current_user["uid"], db)
+    query = build_reminder_tab_query(pet_id, tab, today_str)
     sort_dir = 1 if tab in ("today", "upcoming") else -1
     docs = await db.reminders.find(query, sort=[("date", sort_dir)]).to_list(None)
-    return [_enrich(d) for d in docs]
+    return [_enrich(d, today_str) for d in docs]
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +102,7 @@ async def create_reminder(
     }
     result = await db.reminders.insert_one(doc)
     doc["_id"] = result.inserted_id
-    return _enrich(doc)
+    return _enrich(doc, await _user_today_str(current_user["uid"], db))
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +118,7 @@ async def get_reminder(
 ):
     await validate_pet_ownership(pet_id, current_user["uid"], db)
     doc = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
-    return _enrich(doc)
+    return _enrich(doc, await _user_today_str(current_user["uid"], db))
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +148,7 @@ async def update_reminder(
         {"_id": ObjectId(reminder_id)}, {"$set": updates}
     )
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
-    return _enrich(updated)
+    return _enrich(updated, await _user_today_str(current_user["uid"], db))
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +176,7 @@ async def update_reminder_status(
         {"$set": {"status": body.status}},
     )
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
-    return _enrich(updated)
+    return _enrich(updated, await _user_today_str(current_user["uid"], db))
 
 
 # ---------------------------------------------------------------------------
