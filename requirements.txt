@@ -8,3 +8,5 @@ python-dotenv
 httpx
 bcrypt
 google-cloud-secret-manager
+python-dateutil
+tzdata

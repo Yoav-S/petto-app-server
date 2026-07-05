@@ -19,7 +19,15 @@ logger = logging.getLogger("petto")
 from app.core.database import connect_to_db, close_db_connection
 from app.core.firebase import initialize_firebase
 from app.core.gcp_secrets import resolve_resend_credentials
-from app.routers import users, pets, vaccinations, medical_records, reminders, auth
+from app.routers import (
+    users,
+    pets,
+    vaccinations,
+    medical_records,
+    reminders,
+    auth,
+    notifications,
+)
 
 
 @asynccontextmanager
@@ -79,6 +87,7 @@ app.include_router(pets.router, prefix=PREFIX)
 app.include_router(vaccinations.router, prefix=PREFIX)
 app.include_router(medical_records.router, prefix=PREFIX)
 app.include_router(reminders.router, prefix=PREFIX)
+app.include_router(notifications.router, prefix=PREFIX)
 
 
 @app.get("/health", tags=["health"])

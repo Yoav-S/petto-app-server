@@ -40,6 +40,12 @@ async def connect_to_db() -> None:
     # reminders — look up by pet + date (for tab filtering)
     await _db.reminders.create_index([("pet_id", 1), ("date", 1)])
     await _db.reminders.create_index([("pet_id", 1), ("status", 1)])
+    # reminders — dispatcher scan for un-notified scheduled reminders
+    await _db.reminders.create_index([("status", 1), ("notified_at", 1)])
+
+    # push_tokens — one document per device token, look up by user
+    await _db.push_tokens.create_index("token", unique=True)
+    await _db.push_tokens.create_index("user_id")
 
 
 async def close_db_connection() -> None:

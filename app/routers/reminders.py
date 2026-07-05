@@ -88,6 +88,7 @@ async def create_reminder(
         **body.model_dump(),
         "pet_id": pet_id,
         "status": "scheduled",       # stored status — computed on read
+        "notified_at": None,         # set once a push has been sent (dispatcher)
         "created_at": datetime.now(timezone.utc),
     }
     result = await db.reminders.insert_one(doc)

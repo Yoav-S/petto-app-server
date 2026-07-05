@@ -61,3 +61,7 @@ class ReminderOut(BaseModel):
     # Server-computed display status: "today" | "scheduled" | "missed" | "completed"
     status: str
     created_at: datetime
+    # Set once a push notification has been sent for this occurrence.
+    # None/absent means "not yet notified". Recurring reminders reset this
+    # each time they roll over to the next occurrence.
+    notified_at: Optional[datetime] = None

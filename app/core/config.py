@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     DEEP_LINK_SCHEME: str
     DEEP_LINK_DOMAIN: str
 
+    # Push notifications (Expo)
+    #   EXPO_ACCESS_TOKEN     optional — only needed if you enable "Enhanced
+    #                         Security for Push Notifications" in Expo.
+    #   INTERNAL_TASK_SECRET  shared secret the reminder dispatcher requires.
+    #                         Cloud Scheduler must send it as X-Internal-Secret.
+    #                         If empty, the dispatch endpoint is disabled (safe default).
+    #   DEFAULT_TIMEZONE      fallback IANA tz used when a user's tz is unknown.
+    EXPO_ACCESS_TOKEN: str = ""
+    INTERNAL_TASK_SECRET: str = ""
+    DEFAULT_TIMEZONE: str = "UTC"
+
     # Email (OTP) — Resend API (no SMTP) OR classic SMTP; else OTP logged in dev
     RESEND_API_KEY: str = ""
     RESEND_FROM_EMAIL: str = ""

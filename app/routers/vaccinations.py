@@ -87,6 +87,7 @@ async def create_vaccination(
             "repeat": "off",
             "status": "scheduled",
             "note": None,
+            "notified_at": None,      # set once a push has been sent (dispatcher)
             "created_at": datetime.now(timezone.utc),
         }
         await db.reminders.insert_one(reminder_doc)
