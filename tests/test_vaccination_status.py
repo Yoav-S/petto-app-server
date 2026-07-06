@@ -130,3 +130,72 @@ class TestVaccinationAutoReminder:
             f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
         )
         assert r.json() == []
+
+
+class TestVaccinationPhotoAndClinic:
+    """photo_url and vet_clinic round-trip (client vaccines flow)."""
+
+    def test_create_with_photo_and_clinic(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/vaccinations",
+            json={
+                "name": "Rabies",
+                "date": today_minus(30),
+                "next_date": today_plus(365),
+                "photo_url": "https://storage.example/vaccines/proof.jpg",
+                "vet_clinic": "Dr. Cohen Veterinary Clinic",
+            },
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert data["photo_url"] == "https://storage.example/vaccines/proof.jpg"
+        assert data["vet_clinic"] == "Dr. Cohen Veterinary Clinic"
+
+    def test_patch_photo_and_clear_clinic(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/vaccinations",
+            json={
+                "name": "Bordetella",
+                "date": today_minus(60),
+                "next_date": today_plus(300),
+                "vet_clinic": "Pet Care Center",
+            },
+            headers=HEADERS_A,
+        )
+        vac_id = r.json()["id"]
+
+        r2 = client.patch(
+            f"/api/v1/pets/{pet['id']}/vaccinations/{vac_id}",
+            json={
+                "photo_url": "https://storage.example/vaccines/new.jpg",
+                "vet_clinic": None,
+            },
+            headers=HEADERS_A,
+        )
+        assert r2.status_code == 200
+        data = r2.json()
+        assert data["photo_url"] == "https://storage.example/vaccines/new.jpg"
+        assert data["vet_clinic"] is None
+
+    def test_get_one_returns_new_fields(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/vaccinations",
+            json={
+                "name": "DHPP",
+                "date": today_minus(10),
+                "photo_url": "https://storage.example/vaccines/dhpp.jpg",
+            },
+            headers=HEADERS_A,
+        )
+        vac_id = r.json()["id"]
+        r2 = client.get(
+            f"/api/v1/pets/{pet['id']}/vaccinations/{vac_id}",
+            headers=HEADERS_A,
+        )
+        assert r2.status_code == 200
+        assert r2.json()["photo_url"] == "https://storage.example/vaccines/dhpp.jpg"
+        assert r2.json()["vet_clinic"] is None
