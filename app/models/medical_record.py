@@ -70,7 +70,10 @@ class MedicalRecordOut(BaseModel):
     resolved_at: Optional[datetime]
     # Preview fields for list cards (populated server-side)
     latest_note_preview: Optional[str] = None   # first 100 chars of latest note
-    linked_reminder_time: Optional[str] = None  # "HH:MM" from latest note's reminder
+    latest_note_id: Optional[str] = None        # id of the newest note (for edit deep-links)
+    latest_note_photo_url: Optional[str] = None # photo on the newest note, if any
+    linked_reminder_date: Optional[str] = None  # only when the newest note has a reminder
+    linked_reminder_time: Optional[str] = None  # "HH:MM" from most recent note w/ reminder
     updated_at: Optional[datetime] = None        # latest note time (for "Updated …" label)
 
 

@@ -98,36 +98,57 @@ async def _build_note_out(note_doc: dict, db) -> HealthNoteOut:
 
 async def _get_record_preview(
     record_id: str, db
-) -> tuple[Optional[str], Optional[str], Optional[datetime]]:
+) -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[datetime],
+]:
     """
-    For list cards: return (latest_note_preview, linked_reminder_time, latest_note_created_at).
-    Fetches the single most recent note for this record.
+    For list cards return:
+      latest_note_preview, latest_note_id, latest_note_photo_url,
+      linked_reminder_date, linked_reminder_time (only if the latest note has one),
+      latest_note_created_at.
     """
     latest = await db.health_notes.find_one(
         {"medical_record_id": record_id},
         sort=[("created_at", -1)],
     )
     if not latest:
-        return None, None, None
+        return None, None, None, None, None, None
 
     preview = latest.get("text", "")[:100]
+    latest_note_id = str(latest["_id"])
+    latest_note_photo_url = latest.get("photo_url")
+    latest_created_at = latest.get("created_at")
+
+    # Reminder on the card only when the *latest* note itself has a linked reminder.
+    linked_date = None
     linked_time = None
     linked_id = latest.get("linked_reminder_id")
     if linked_id and is_valid_object_id(linked_id):
         reminder = await db.reminders.find_one({"_id": ObjectId(linked_id)})
         if reminder:
+            linked_date = reminder.get("date")
             linked_time = reminder.get("time")
-    return preview, linked_time, latest.get("created_at")
+
+    return preview, latest_note_id, latest_note_photo_url, linked_date, linked_time, latest_created_at
 
 
 async def _enrich_record(doc: dict, db) -> MedicalRecordOut:
     """Build MedicalRecordOut with preview fields for list cards."""
     d = doc_to_dict(doc)
     record_id = d["id"]
-    preview, linked_time, latest_created_at = await _get_record_preview(record_id, db)
+    preview, latest_note_id, latest_photo, linked_date, linked_time, latest_created_at = (
+        await _get_record_preview(record_id, db)
+    )
     d["latest_note_preview"] = preview
+    d["latest_note_id"] = latest_note_id
+    d["latest_note_photo_url"] = latest_photo
+    d["linked_reminder_date"] = linked_date
     d["linked_reminder_time"] = linked_time
-    # "Updated …" label: newest note time, else resolved/created time.
     d["updated_at"] = latest_created_at or d.get("resolved_at") or d.get("created_at")
     return MedicalRecordOut(**d)
 
@@ -212,11 +233,15 @@ async def get_medical_record(
     notes = [await _build_note_out(n, db) for n in note_docs]
     d = doc_to_dict(record)
     d["notes"] = notes
-    d["latest_note_preview"] = notes[0].text[:100] if notes else None
-    d["linked_reminder_time"] = notes[0].linked_reminder_time if notes else None
-    d["updated_at"] = (
-        notes[0].created_at if notes else (d.get("resolved_at") or d.get("created_at"))
+    preview, latest_note_id, latest_photo, linked_date, linked_time, latest_created_at = (
+        await _get_record_preview(record_id, db)
     )
+    d["latest_note_preview"] = preview
+    d["latest_note_id"] = latest_note_id
+    d["latest_note_photo_url"] = latest_photo
+    d["linked_reminder_date"] = linked_date
+    d["linked_reminder_time"] = linked_time
+    d["updated_at"] = latest_created_at or d.get("resolved_at") or d.get("created_at")
     return MedicalRecordDetailOut(**d)
 
 
