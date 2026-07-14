@@ -88,6 +88,33 @@ class TestReminderValidation:
         )
         assert r.status_code == 422
 
+    def test_duplicate_datetime_rejected(self, client):
+        """Two scheduled reminders cannot share the same date+time on one pet."""
+        pet = make_pet(client, HEADERS_A)
+        payload = {"title": "Morning meds", "date": "2099-06-01", "time": "09:00"}
+        first = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders", json=payload, headers=HEADERS_A
+        )
+        assert first.status_code == 201
+        second = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={"title": "Other task", "date": "2099-06-01", "time": "09:00"},
+            headers=HEADERS_A,
+        )
+        assert second.status_code == 409
+        assert second.json()["detail"]["code"] == "duplicate_reminder_datetime"
+
+    def test_past_datetime_rejected(self, client):
+        """Cannot schedule a reminder in the past."""
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={"title": "Too late", "date": "2000-01-01", "time": "09:00"},
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 422
+        assert r.json()["detail"]["code"] == "reminder_datetime_in_past"
+
 
 class TestVaccinationValidation:
     """Vaccination requires name and date."""
