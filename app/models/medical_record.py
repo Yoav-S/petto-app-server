@@ -54,6 +54,7 @@ class HealthNoteOut(BaseModel):
 
 class MedicalRecordCreate(BaseModel):
     title: str = Field(..., max_length=300)      # free-text condition name
+    description: Optional[str] = Field(None, max_length=300)
 
 
 class MedicalRecordStatusUpdate(BaseModel):
@@ -65,6 +66,7 @@ class MedicalRecordOut(BaseModel):
     id: str
     pet_id: str
     title: str
+    description: Optional[str] = None
     status: str                                  # "active" | "resolved"
     created_at: datetime
     resolved_at: Optional[datetime]

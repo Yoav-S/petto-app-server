@@ -5,7 +5,7 @@ Keeps all status calculation logic in one place so it's easy
 to find and test in isolation. Also holds the MongoDB document
 serializer so no router needs to know about _id / ObjectId.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from bson import ObjectId
 from fastapi import HTTPException
@@ -19,11 +19,21 @@ _NOT_FOUND = {"code": ErrorCode.NOT_FOUND.value}
 # MongoDB helpers
 # ---------------------------------------------------------------------------
 
+def _serialize_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        dt = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+    if isinstance(value, ObjectId):
+        return str(value)
+    return value
+
+
 def doc_to_dict(doc: dict) -> dict:
     """
     Convert a raw MongoDB document to a plain dict suitable for API responses.
     - Renames _id → id
     - Serializes ObjectId values to strings
+    - Serializes datetime values to UTC ISO-8601 strings
     """
     if doc is None:
         return {}
@@ -31,10 +41,8 @@ def doc_to_dict(doc: dict) -> dict:
     for key, value in doc.items():
         if key == "_id":
             result["id"] = str(value)
-        elif isinstance(value, ObjectId):
-            result[key] = str(value)
         else:
-            result[key] = value
+            result[key] = _serialize_value(value)
     return result
 
 

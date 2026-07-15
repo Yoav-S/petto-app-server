@@ -188,11 +188,20 @@ def make_vaccination(client, pet_id: str, headers: dict, **kwargs) -> dict:
     return r.json()
 
 
-def make_medical_record(client, pet_id: str, headers: dict, title: str = "Allergy") -> dict:
+def make_medical_record(
+    client,
+    pet_id: str,
+    headers: dict,
+    title: str = "Allergy",
+    description: str | None = None,
+) -> dict:
     """Create a health condition."""
+    payload: dict = {"title": title}
+    if description is not None:
+        payload["description"] = description
     r = client.post(
         f"/api/v1/pets/{pet_id}/medical-records",
-        json={"title": title},
+        json=payload,
         headers=headers,
     )
     assert r.status_code == 201, r.text

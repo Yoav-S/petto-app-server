@@ -201,6 +201,7 @@ async def create_medical_record(
     doc = {
         "pet_id": pet_id,
         "title": body.title,
+        "description": (body.description or "").strip() or None,
         "status": "active",
         "created_at": datetime.now(timezone.utc),
         "resolved_at": None,
