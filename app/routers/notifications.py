@@ -29,6 +29,8 @@ from app.core.scheduling import compute_scheduled_at, next_occurrence
 from app.core.utils import is_valid_object_id
 from app.middleware.auth import get_current_user
 from app.models.notification import (
+    NotificationPrefs,
+    NotificationPrefsUpdate,
     RegisterPushRequest,
     RegisterPushResponse,
     UnregisterPushRequest,
@@ -36,6 +38,21 @@ from app.models.notification import (
 
 router = APIRouter(tags=["notifications"])
 logger = logging.getLogger("petto")
+
+# All switches default ON — a fresh user receives everything until they opt out.
+DEFAULT_NOTIFICATION_PREFS = {
+    "all": True,
+    "reminders": True,
+    "vaccine_updates": True,
+    "health_reminders": True,
+    "email_updates": True,
+}
+
+
+def _merge_notification_prefs(stored: dict | None) -> NotificationPrefs:
+    """Overlay stored switches on the defaults so older users get sane values."""
+    data = {**DEFAULT_NOTIFICATION_PREFS, **(stored or {})}
+    return NotificationPrefs(**{key: data[key] for key in DEFAULT_NOTIFICATION_PREFS})
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +116,41 @@ async def unregister_push(
 
 
 # ---------------------------------------------------------------------------
+# App-facing: notification preferences
+# ---------------------------------------------------------------------------
+
+@router.get("/notifications/preferences", response_model=NotificationPrefs)
+async def get_notification_preferences(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Return the current user's notification switches (defaults when unset)."""
+    user = await db.users.find_one({"firebase_uid": current_user["uid"]})
+    return _merge_notification_prefs((user or {}).get("notification_prefs"))
+
+
+@router.patch("/notifications/preferences", response_model=NotificationPrefs)
+async def update_notification_preferences(
+    body: NotificationPrefsUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Persist changed switches; returns the full, merged preference set."""
+    uid = current_user["uid"]
+    changes = body.model_dump(exclude_unset=True)
+
+    if changes:
+        now = datetime.now(timezone.utc)
+        updates = {f"notification_prefs.{key}": value for key, value in changes.items()}
+        updates["updated_at"] = now
+        await db.users.update_one({"firebase_uid": uid}, {"$set": updates})
+        logger.info("notification prefs updated uid=%s changes=%s", uid, changes)
+
+    user = await db.users.find_one({"firebase_uid": uid})
+    return _merge_notification_prefs((user or {}).get("notification_prefs"))
+
+
+# ---------------------------------------------------------------------------
 # Internal: reminder dispatcher (secret-protected, called by Cloud Scheduler)
 # ---------------------------------------------------------------------------
 
@@ -133,6 +185,7 @@ async def dispatch_reminders(
     pet_cache: dict[str, dict | None] = {}
     tz_cache: dict[str, str | None] = {}
     token_cache: dict[str, list[str]] = {}
+    prefs_cache: dict[str, NotificationPrefs] = {}
 
     async def get_pet(pet_id: str) -> dict | None:
         if pet_id not in pet_cache:
@@ -155,6 +208,12 @@ async def dispatch_reminders(
             token_cache[uid] = [d["token"] for d in docs if d.get("token")]
         return token_cache[uid]
 
+    async def get_prefs(uid: str) -> NotificationPrefs:
+        if uid not in prefs_cache:
+            user = await db.users.find_one({"firebase_uid": uid})
+            prefs_cache[uid] = _merge_notification_prefs((user or {}).get("notification_prefs"))
+        return prefs_cache[uid]
+
     items: list[dict] = []
     due_count = 0
     processed = 0
@@ -172,6 +231,9 @@ async def dispatch_reminders(
 
         due_count += 1
         tokens = await get_tokens(uid)
+        prefs = await get_prefs(uid)
+        # Master switch + the "Reminders" category both gate reminder pushes.
+        reminders_enabled = prefs.all and prefs.reminders
         reminder_id = str(reminder["_id"])
         item = {
             "reminder_id": reminder_id,
@@ -182,7 +244,17 @@ async def dispatch_reminders(
         }
 
         if dry_run:
-            item["would_send"] = bool(tokens)
+            item["would_send"] = bool(tokens) and reminders_enabled
+            if not reminders_enabled:
+                item["reason"] = "notifications_disabled"
+            items.append(item)
+            continue
+
+        if not reminders_enabled:
+            # User opted out — skip silently and leave the reminder unmarked so
+            # it resumes firing if they re-enable notifications.
+            item["delivered"] = False
+            item["reason"] = "notifications_disabled"
             items.append(item)
             continue
 

@@ -29,3 +29,25 @@ class RegisterPushResponse(BaseModel):
 
 class UnregisterPushRequest(BaseModel):
     token: str = Field(..., max_length=255)
+
+
+class NotificationPrefs(BaseModel):
+    """
+    Per-user notification switches (stored on the user document under
+    `notification_prefs`). `all` is the master gate — when False, nothing is
+    delivered regardless of the category switches.
+    """
+    all: bool = True
+    reminders: bool = True
+    vaccine_updates: bool = True
+    health_reminders: bool = True
+    email_updates: bool = True
+
+
+class NotificationPrefsUpdate(BaseModel):
+    """Partial update — only provided switches are changed."""
+    all: Optional[bool] = None
+    reminders: Optional[bool] = None
+    vaccine_updates: Optional[bool] = None
+    health_reminders: Optional[bool] = None
+    email_updates: Optional[bool] = None
