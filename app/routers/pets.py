@@ -118,6 +118,11 @@ async def delete_pet(
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
 
+    # A user must always keep at least one pet — block deleting the last one.
+    pet_count = await db.pets.count_documents({"user_id": current_user["uid"]})
+    if pet_count <= 1:
+        raise_api_error(409, ErrorCode.CANNOT_DELETE_LAST_PET)
+
     # Cascade: delete health_notes for all medical_records of this pet
     medical_record_ids = [
         str(doc["_id"])

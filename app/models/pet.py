@@ -19,6 +19,7 @@ class PetCreate(BaseModel):
     photo_url: Optional[str] = None
     breed: Optional[str] = Field(None, max_length=100)
     birth_date: Optional[str] = None                # "YYYY-MM-DD"
+    sex: Optional[str] = Field(None, max_length=10)  # "male" | "female"
     weight: Optional[float] = None
     chip_id: Optional[str] = Field(None, max_length=100)
     passport_number: Optional[str] = Field(None, max_length=100)
@@ -34,6 +35,7 @@ class PetUpdate(BaseModel):
     photo_url: Optional[str] = None
     breed: Optional[str] = Field(None, max_length=100)
     birth_date: Optional[str] = None
+    sex: Optional[str] = Field(None, max_length=10)
     weight: Optional[float] = None
     chip_id: Optional[str] = Field(None, max_length=100)
     passport_number: Optional[str] = Field(None, max_length=100)
@@ -49,6 +51,7 @@ class PetOut(BaseModel):
     photo_url: Optional[str]
     breed: Optional[str]
     birth_date: Optional[str]
+    sex: Optional[str] = None
     weight: Optional[float]
     chip_id: Optional[str]
     passport_number: Optional[str]
