@@ -125,3 +125,39 @@ def verify_firebase_token(token: str) -> dict:
     Raises firebase_admin.auth.InvalidIdTokenError on failure.
     """
     return firebase_auth.verify_id_token(token)
+
+
+def delete_auth_user(uid: str) -> None:
+    """
+    Delete the Firebase Authentication user.
+    Raises firebase_admin.auth.UserNotFoundError if already gone (caller may ignore).
+    """
+    firebase_auth.delete_user(uid)
+
+
+def delete_user_storage_files(uid: str) -> int:
+    """
+    Best-effort deletion of every Storage object under users/{uid}/.
+
+    Returns the number of deleted objects. Never raises — storage cleanup must
+    not block account deletion; failures are logged for manual follow-up.
+    """
+    bucket_name = settings.firebase_storage_bucket
+    if not bucket_name:
+        logger.warning("Storage cleanup skipped for uid=%s: no bucket configured", uid)
+        return 0
+
+    try:
+        from firebase_admin import storage
+
+        bucket = storage.bucket(bucket_name, app=_app)
+        blobs = list(bucket.list_blobs(prefix=f"users/{uid}/"))
+        for blob in blobs:
+            try:
+                blob.delete()
+            except Exception as exc:  # noqa: BLE001 — per-file best effort
+                logger.warning("Failed deleting storage blob %s: %s", blob.name, exc)
+        return len(blobs)
+    except Exception as exc:  # noqa: BLE001 — cleanup is best effort
+        logger.error("Storage cleanup failed for uid=%s: %s", uid, exc)
+        return 0

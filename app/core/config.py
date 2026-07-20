@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     FIREBASE_CLIENT_EMAIL: str
     FIREBASE_PRIVATE_KEY: str = ""
     FIREBASE_PRIVATE_KEY_BASE64: str = ""
+    # Storage bucket for user uploads (pet/health photos). Defaults to the
+    # project's Firebase Storage bucket when left empty.
+    FIREBASE_STORAGE_BUCKET: str = ""
     
     # Deep Links
     DEEP_LINK_SCHEME: str
@@ -54,6 +57,15 @@ class Settings(BaseSettings):
     def mongodb_db_name(self) -> str:
         """Strip accidental whitespace from DB name."""
         return self.MONGODB_DB_NAME.strip()
+
+    @property
+    def firebase_storage_bucket(self) -> str:
+        """Resolved Storage bucket name (explicit env or project default)."""
+        if self.FIREBASE_STORAGE_BUCKET.strip():
+            return self.FIREBASE_STORAGE_BUCKET.strip()
+        if self.FIREBASE_PROJECT_ID.strip():
+            return f"{self.FIREBASE_PROJECT_ID.strip()}.firebasestorage.app"
+        return ""
 
     @property
     def resend_configured(self) -> bool:
