@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = ""
     SMTP_USE_TLS: bool = True
+
+    # RevenueCat — webhook auth (Bearer secret you set in RC dashboard).
+    # Public SDK keys live on the client only (EXPO_PUBLIC_REVENUECAT_*).
+    REVENUECAT_WEBHOOK_SECRET: str = ""
+    REVENUECAT_API_KEY: str = ""
     
     @property
     def is_development(self) -> bool:

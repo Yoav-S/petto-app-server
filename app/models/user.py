@@ -5,6 +5,8 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, Literal
 from datetime import datetime
 
+from app.models.subscription import SubscriptionOut
+
 
 AuthProvider = Literal["email", "google"]
 
@@ -20,3 +22,4 @@ class UserOut(BaseModel):
     #   has_pets == True  → returning user, go straight into the app
     #   has_pets == False → send to onboarding to add the first pet
     has_pets: bool = False
+    subscription: SubscriptionOut = SubscriptionOut()

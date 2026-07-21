@@ -27,6 +27,8 @@ class ErrorCode(StrEnum):
     DUPLICATE_REMINDER_DATETIME = "duplicate_reminder_datetime"
     REMINDER_DATETIME_IN_PAST = "reminder_datetime_in_past"
     CANNOT_DELETE_LAST_PET = "cannot_delete_last_pet"
+    PREMIUM_REQUIRED_PET = "premium_required_pet"
+    PREMIUM_REQUIRED_REMINDER = "premium_required_reminder"
 
 
 def raise_api_error(

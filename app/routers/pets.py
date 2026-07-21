@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from app.core.database import get_database
 from app.core.errors import ErrorCode, raise_api_error
+from app.core.subscription import FREE_MAX_PETS, count_user_pets, user_has_premium
 from app.core.utils import doc_to_dict, validate_pet_ownership
 from app.middleware.auth import get_current_user
 from app.models.pet import PetCreate, PetUpdate, PetOut
@@ -46,9 +47,16 @@ async def create_pet(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """Create a new pet for the current user (onboarding + add pet)."""
+    uid = current_user["uid"]
+    user = await db.users.find_one({"firebase_uid": uid})
+    if not user_has_premium(user):
+        pet_count = await count_user_pets(uid, db)
+        if pet_count >= FREE_MAX_PETS:
+            raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_PET)
+
     doc = {
         **body.model_dump(),
-        "user_id": current_user["uid"],
+        "user_id": uid,
         "created_at": datetime.now(timezone.utc),
     }
     result = await db.pets.insert_one(doc)

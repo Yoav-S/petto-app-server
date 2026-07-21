@@ -21,6 +21,11 @@ from datetime import datetime, timezone
 
 from app.core.database import get_database
 from app.core.scheduling import resolve_timezone, compute_scheduled_at
+from app.core.subscription import (
+    FREE_MAX_ACTIVE_REMINDERS,
+    count_active_reminders,
+    user_has_premium,
+)
 from app.core.utils import (
     doc_to_dict,
     is_valid_object_id,
@@ -130,8 +135,17 @@ async def create_reminder(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """Create a new reminder. Initial stored_status is always 'scheduled'."""
-    await validate_pet_ownership(pet_id, current_user["uid"], db)
-    await _assert_future_datetime(current_user["uid"], body.date, body.time, db)
+    uid = current_user["uid"]
+    await validate_pet_ownership(pet_id, uid, db)
+
+    user = await db.users.find_one({"firebase_uid": uid})
+    if not user_has_premium(user):
+        today_str = await _user_today_str(uid, db)
+        active = await count_active_reminders(uid, db, today_str)
+        if active >= FREE_MAX_ACTIVE_REMINDERS:
+            raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_REMINDER)
+
+    await _assert_future_datetime(uid, body.date, body.time, db)
     await _assert_unique_datetime(pet_id, body.date, body.time, db)
     doc = {
         **body.model_dump(),
@@ -142,7 +156,7 @@ async def create_reminder(
     }
     result = await db.reminders.insert_one(doc)
     doc["_id"] = result.inserted_id
-    return _enrich(doc, await _user_today_str(current_user["uid"], db))
+    return _enrich(doc, await _user_today_str(uid, db))
 
 
 # ---------------------------------------------------------------------------

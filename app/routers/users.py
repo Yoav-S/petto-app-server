@@ -17,6 +17,8 @@ from app.core.firebase import delete_auth_user, delete_user_storage_files
 from app.core.utils import doc_to_dict
 from app.middleware.auth import get_current_user
 from app.models.user import UserOut
+from app.models.subscription import SubscriptionOut
+from app.core.subscription import normalize_subscription
 
 from app.core.errors import ErrorCode, raise_api_error
 
@@ -35,6 +37,10 @@ def _infer_auth_provider(decoded_token: dict) -> str:
     return "email"
 
 
+def _subscription_out(doc: dict) -> SubscriptionOut:
+    return SubscriptionOut(**normalize_subscription(doc.get("subscription")))
+
+
 def _user_to_out(doc: dict, has_pets: bool = False) -> UserOut:
     data = doc_to_dict(doc)
     return UserOut(
@@ -45,6 +51,7 @@ def _user_to_out(doc: dict, has_pets: bool = False) -> UserOut:
         created_at=data["created_at"],
         last_login_at=data.get("last_login_at"),
         has_pets=has_pets,
+        subscription=_subscription_out(doc),
     )
 
 
@@ -115,6 +122,14 @@ async def upsert_user(
         "created_at": now,
         "last_login_at": now,
         "updated_at": now,
+        "subscription": {
+            "plan": "free",
+            "provider": None,
+            "product_id": None,
+            "expires_at": None,
+            "will_renew": False,
+            "updated_at": None,
+        },
     }
     result = await db.users.insert_one(doc)
     doc["_id"] = result.inserted_id
