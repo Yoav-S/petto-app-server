@@ -62,6 +62,6 @@ class ReminderOut(BaseModel):
     status: str
     created_at: datetime
     # Set once a push notification has been sent for this occurrence.
-    # None/absent means "not yet notified". Recurring reminders reset this
-    # each time they roll over to the next occurrence.
+    # Cleared when the user marks Done/Missed (and when a recurring reminder
+    # rolls forward to its next occurrence).
     notified_at: Optional[datetime] = None

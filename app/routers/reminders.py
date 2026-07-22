@@ -20,7 +20,7 @@ from bson import ObjectId
 from datetime import datetime, timezone
 
 from app.core.database import get_database
-from app.core.scheduling import resolve_timezone, compute_scheduled_at
+from app.core.scheduling import resolve_timezone, compute_scheduled_at, next_occurrence
 from app.core.subscription import (
     FREE_MAX_ACTIVE_REMINDERS,
     count_active_reminders,
@@ -230,17 +230,32 @@ async def update_reminder_status(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
-    Mark a reminder as completed or missed.
-    This is a separate route from field updates to keep intent clear.
-    Note: no auto-record creation (type field was dropped).
+    Mark a reminder occurrence as completed or missed.
+
+    One-off reminders store the terminal status. Recurring reminders roll
+    forward to the next occurrence (stay scheduled) so the series continues.
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
-    await validate_entity_ownership("reminders", reminder_id, pet_id, db)
+    reminder = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
 
-    await db.reminders.update_one(
-        {"_id": ObjectId(reminder_id)},
-        {"$set": {"status": body.status}},
-    )
+    next_date = next_occurrence(reminder.get("date", ""), reminder.get("repeat", "off"))
+    if next_date:
+        await db.reminders.update_one(
+            {"_id": ObjectId(reminder_id)},
+            {
+                "$set": {
+                    "date": next_date,
+                    "status": "scheduled",
+                    "notified_at": None,
+                }
+            },
+        )
+    else:
+        await db.reminders.update_one(
+            {"_id": ObjectId(reminder_id)},
+            {"$set": {"status": body.status, "notified_at": None}},
+        )
+
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
     return _enrich(updated, await _user_today_str(current_user["uid"], db))
 

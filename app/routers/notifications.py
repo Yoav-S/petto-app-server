@@ -25,7 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.config import settings
 from app.core.database import get_database
 from app.core.push import is_dead_token_ticket, send_expo_push
-from app.core.scheduling import compute_scheduled_at, next_occurrence
+from app.core.scheduling import compute_scheduled_at
 from app.core.utils import is_valid_object_id
 from app.middleware.auth import get_current_user
 from app.models.notification import (
@@ -273,7 +273,11 @@ async def dispatch_reminders(
                 "title": pet.get("name") or "Petto reminder",
                 "body": reminder.get("title", "Reminder"),
                 "sound": "default",
-                "data": {"reminderId": reminder_id, "petId": reminder.get("pet_id")},
+                "data": {
+                    "type": "reminder",
+                    "reminderId": reminder_id,
+                    "petId": reminder.get("pet_id"),
+                },
             }
             for token in tokens
         ]
@@ -284,20 +288,16 @@ async def dispatch_reminders(
                 await db.push_tokens.delete_one({"token": token})
                 logger.info("pruned dead push token for user %s", uid)
 
-        next_date = next_occurrence(reminder.get("date", ""), reminder.get("repeat", "off"))
-        if next_date:
-            await db.reminders.update_one(
-                {"_id": reminder["_id"]},
-                {"$set": {"date": next_date, "notified_at": None}},
-            )
-        else:
-            await db.reminders.update_one(
-                {"_id": reminder["_id"]}, {"$set": {"notified_at": now}}
-            )
+        # Mark as notified but keep the occurrence date until the user taps
+        # Done / Missed. Recurring rollover happens in PATCH .../status so the
+        # client can still prompt for this fire.
+        await db.reminders.update_one(
+            {"_id": reminder["_id"]},
+            {"$set": {"notified_at": now}},
+        )
 
         processed += 1
         item["delivered"] = any(t.get("status") == "ok" for t in tickets)
-        item["repeat_advanced_to"] = next_date
         items.append(item)
 
     summary = {
