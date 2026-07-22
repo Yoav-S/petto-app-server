@@ -72,10 +72,10 @@ Then `GET /api/v1/users/me` (authenticated) should show `"plan":"premium"`.
 | Service | Role for subscriptions |
 |---------|------------------------|
 | Firebase Auth | User id becomes RevenueCat `app_user_id` — already wired |
-| Firebase iOS/Android apps | Needed for the app build / Auth, **not** for RC Test Store |
+| Firebase iOS/Android apps | Native builds + Analytics; package must be `com.yoav.petto` on project `petto-494013` — see [firebase-package-alignment.md](./firebase-package-alignment.md) |
 | Domain (`peto.casa`) | Privacy/Terms links, email OTP, optional custom API host — **not** required for Test Store IAP |
 
-You do **not** need to finish every Firebase console field to test Test Store subscriptions.
+You do **not** need to finish every Firebase console field to test Test Store purchases. Skip the RevenueCat Firestore Extension; Analytics → Firebase is only for GA charts.
 
 ## Step 5 — Later (publish): real stores
 
