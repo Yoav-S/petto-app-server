@@ -14,8 +14,8 @@ from datetime import datetime
 
 class VaccinationCreate(BaseModel):
     name: str = Field(..., max_length=200)
-    date: str                                        # "YYYY-MM-DD" — past date
-    next_date: Optional[str] = None                  # "YYYY-MM-DD" — future date
+    date: str                                        # "YYYY-MM-DD" — vaccinated on (≤ today)
+    next_date: Optional[str] = None                  # "YYYY-MM-DD" — valid until (≥ date)
     note: Optional[str] = Field(None, max_length=300)
     photo_url: Optional[str] = None                  # proof photo URL (Firebase Storage)
     vet_clinic: Optional[str] = Field(None, max_length=300)

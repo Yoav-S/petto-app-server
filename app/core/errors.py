@@ -29,6 +29,8 @@ class ErrorCode(StrEnum):
     CANNOT_DELETE_LAST_PET = "cannot_delete_last_pet"
     PREMIUM_REQUIRED_PET = "premium_required_pet"
     PREMIUM_REQUIRED_REMINDER = "premium_required_reminder"
+    VACCINATION_DATE_IN_FUTURE = "vaccination_date_in_future"
+    VACCINATION_VALID_UNTIL_BEFORE_DATE = "vaccination_valid_until_before_date"
 
 
 def raise_api_error(
