@@ -77,11 +77,25 @@ Then `GET /api/v1/users/me` (authenticated) should show `"plan":"premium"`.
 
 You do **not** need to finish every Firebase console field to test Test Store purchases. Skip the RevenueCat Firestore Extension; Analytics → Firebase is only for GA charts.
 
-## Step 5 — Later (publish): real stores
+## Step 5 — Standalone app **without** Play Store (recommended now)
 
-1. App Store Connect + Play: create subscription (can keep store id `sub_premium` or map in RC)
-2. RevenueCat: add iOS/Android apps, upload ASC API key + Play service account
-3. Replace client keys with `appl_…` / `goog_…`
+Use RevenueCat **Test Store** + an EAS **preview** APK (JS baked in — no Metro).
+
+1. Dashboard already: product `sub_premium` → offering `default` → `$rc_monthly` → entitlement `petto_premium`
+2. Client keys stay `test_…` in `client/.env` **and** on EAS (`preview` / `production` / `development` envs)
+3. Build & install:
+   ```bash
+   cd client
+   npx eas-cli build --profile preview --platform android
+   ```
+   Install the APK from the Expo link on your phone — open Petto anytime, no `expo start`.
+4. Purchases use RevenueCat’s simulated Test Store (no Google Play Billing, no store listing).
+
+## Step 6 — Later (real Play / App Store)
+
+1. App Store Connect + Play: create subscription (id `sub_premium` or map in RC)
+2. RevenueCat: Play service account + store products on the same offering
+3. Replace client / EAS keys with `appl_…` / `goog_…`
 4. Keep entitlement `petto_premium` attached to the store products
 
 ## Free limits (already enforced)
