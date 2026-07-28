@@ -251,16 +251,27 @@ async def dispatch_reminders(
             continue
 
         if not reminders_enabled:
-            # User opted out — skip silently and leave the reminder unmarked so
-            # it resumes firing if they re-enable notifications.
+            # User opted out — still mark notified so the in-app Done/Missed
+            # prompt can appear; they chose not to get a push.
+            await db.reminders.update_one(
+                {"_id": reminder["_id"]},
+                {"$set": {"notified_at": now}},
+            )
+            processed += 1
             item["delivered"] = False
             item["reason"] = "notifications_disabled"
             items.append(item)
             continue
 
         if not tokens:
-            # Nothing to deliver yet (e.g. still on Expo Go). Leave it unmarked so
-            # it fires once the user has a real build + token.
+            # No device token yet (Expo Go / permissions). Still mark notified
+            # so opening the app can show the status sheet; push will work once
+            # a token is registered for future reminders.
+            await db.reminders.update_one(
+                {"_id": reminder["_id"]},
+                {"$set": {"notified_at": now}},
+            )
+            processed += 1
             item["delivered"] = False
             item["reason"] = "no_tokens"
             items.append(item)
