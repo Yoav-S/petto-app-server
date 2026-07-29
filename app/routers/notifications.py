@@ -25,7 +25,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.config import settings
 from app.core.database import get_database
 from app.core.push import is_dead_token_ticket, send_expo_push
-from app.core.scheduling import compute_scheduled_at, next_occurrence, catch_up_recurring_datefrom app.core.utils import is_valid_object_id
+from app.core.scheduling import compute_scheduled_at, catch_up_recurring_date
+from app.core.utils import is_valid_object_id
 from app.middleware.auth import get_current_user
 from app.models.notification import (
     NotificationPrefs,
