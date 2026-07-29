@@ -175,6 +175,45 @@ async def dispatch_reminders(
     """Find every reminder whose local date/time has arrived and push it."""
     now = datetime.now(timezone.utc)
 
+    # Stuck overdue recurring items already have notified_at, so they never
+    # appear in the due-candidates query below. Catch them up first or they
+    # keep prompting on every app login forever.
+    stuck = await db.reminders.find(
+        {
+            "status": "scheduled",
+            "repeat": {"$nin": ["off", None, ""]},
+            "notified_at": {"$ne": None},
+        }
+    ).to_list(None)
+    for reminder in stuck:
+        pet = (
+            await db.pets.find_one({"_id": ObjectId(reminder["pet_id"])})
+            if is_valid_object_id(reminder.get("pet_id", ""))
+            else None
+        )
+        if not pet:
+            continue
+        uid = pet.get("user_id")
+        user = await db.users.find_one({"firebase_uid": uid})
+        tz_name = (user or {}).get("timezone")
+        caught_up = catch_up_recurring_date(
+            reminder.get("date", ""),
+            reminder.get("time", ""),
+            reminder.get("repeat") or "off",
+            tz_name,
+            after=now,
+        )
+        if caught_up and caught_up != reminder.get("date"):
+            await db.reminders.update_one(
+                {"_id": reminder["_id"]},
+                {"$set": {"date": caught_up, "notified_at": None}},
+            )
+            logger.info(
+                "caught up stuck recurring reminder %s -> %s",
+                reminder["_id"],
+                caught_up,
+            )
+
     candidates = await db.reminders.find(
         {
             "status": "scheduled",
