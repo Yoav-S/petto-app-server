@@ -341,6 +341,8 @@ async def dispatch_reminders(
                 "title": pet.get("name") or "Petto reminder",
                 "body": reminder.get("title", "Reminder"),
                 "sound": "default",
+                "channelId": "default",
+                "priority": "high",
                 "data": {
                     "type": "reminder",
                     "reminderId": reminder_id,
