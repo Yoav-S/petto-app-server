@@ -25,8 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.config import settings
 from app.core.database import get_database
 from app.core.push import is_dead_token_ticket, send_expo_push
-from app.core.scheduling import compute_scheduled_at
-from app.core.utils import is_valid_object_id
+from app.core.scheduling import compute_scheduled_at, next_occurrence, catch_up_recurring_datefrom app.core.utils import is_valid_object_id
 from app.middleware.auth import get_current_user
 from app.models.notification import (
     NotificationPrefs,
@@ -223,9 +222,27 @@ async def dispatch_reminders(
         if not pet:
             continue
         uid = pet.get("user_id")
-        scheduled_at = compute_scheduled_at(
-            reminder.get("date", ""), reminder.get("time", ""), await get_tz(uid)
-        )
+        tz_name = await get_tz(uid)
+        date_str = reminder.get("date", "")
+        time_str = reminder.get("time", "")
+        repeat = reminder.get("repeat") or "off"
+
+        # Recurring series that sat overdue for days: jump to the next future
+        # slot instead of re-firing for every skipped day on each login.
+        if repeat != "off":
+            caught_up = catch_up_recurring_date(
+                date_str, time_str, repeat, tz_name, after=now
+            )
+            if caught_up and caught_up != date_str:
+                await db.reminders.update_one(
+                    {"_id": reminder["_id"]},
+                    {"$set": {"date": caught_up, "notified_at": None}},
+                )
+                date_str = caught_up
+                reminder["date"] = caught_up
+                reminder["notified_at"] = None
+
+        scheduled_at = compute_scheduled_at(date_str, time_str, tz_name)
         if not scheduled_at or scheduled_at > now:
             continue
 

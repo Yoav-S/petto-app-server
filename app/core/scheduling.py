@@ -70,3 +70,34 @@ def next_occurrence(date_str: str, repeat: str) -> str | None:
     except (ValueError, AttributeError):
         return None
     return (datetime(year, month, day) + step).strftime("%Y-%m-%d")
+
+
+def catch_up_recurring_date(
+    date_str: str,
+    time_str: str,
+    repeat: str,
+    tz_name: str | None,
+    *,
+    after: datetime,
+) -> str | None:
+    """
+    Advance a recurring series past every occurrence that is already due/overdue.
+
+    Returns the first date whose scheduled_at is still in the future (after
+    `after`), or None for one-off / unknown repeat. Used so overdue daily
+    reminders don't re-notify for every skipped day.
+    """
+    if repeat not in _REPEAT_STEPS:
+        return None
+    candidate = date_str
+    for _ in range(800):
+        scheduled = compute_scheduled_at(candidate, time_str, tz_name)
+        if scheduled is None:
+            return None
+        if scheduled > after:
+            return candidate
+        nxt = next_occurrence(candidate, repeat)
+        if not nxt:
+            return None
+        candidate = nxt
+    return candidate
