@@ -298,12 +298,29 @@ async def dispatch_reminders(
             "title": reminder.get("title"),
             "scheduled_at": scheduled_at.isoformat(),
             "tokens": len(tokens),
+            "tz": tz_name,
+            "prefs_all": prefs.all,
+            "prefs_reminders": prefs.reminders,
         }
+        logger.info(
+            "reminder DUE id=%s title=%r uid=%s tz=%s scheduled_at=%s tokens=%d "
+            "prefs_all=%s prefs_reminders=%s",
+            reminder_id,
+            reminder.get("title"),
+            uid,
+            tz_name,
+            scheduled_at.isoformat(),
+            len(tokens),
+            prefs.all,
+            prefs.reminders,
+        )
 
         if dry_run:
             item["would_send"] = bool(tokens) and reminders_enabled
             if not reminders_enabled:
                 item["reason"] = "notifications_disabled"
+            elif not tokens:
+                item["reason"] = "no_tokens"
             items.append(item)
             continue
 
@@ -318,6 +335,7 @@ async def dispatch_reminders(
             item["delivered"] = False
             item["reason"] = "notifications_disabled"
             items.append(item)
+            logger.info("reminder %s skipped: notifications_disabled", reminder_id)
             continue
 
         if not tokens:
@@ -351,7 +369,21 @@ async def dispatch_reminders(
             }
             for token in tokens
         ]
-        tickets = await send_expo_push(messages)
+        try:
+            tickets = await send_expo_push(messages)
+        except Exception as exc:
+            logger.exception("reminder %s Expo send failed: %s", reminder_id, exc)
+            item["delivered"] = False
+            item["reason"] = "expo_http_error"
+            item["error"] = str(exc)
+            items.append(item)
+            # Still mark notified so the in-app sheet can show.
+            await db.reminders.update_one(
+                {"_id": reminder["_id"]},
+                {"$set": {"notified_at": now}},
+            )
+            processed += 1
+            continue
 
         for token, ticket in zip(tokens, tickets):
             if is_dead_token_ticket(ticket):
@@ -368,7 +400,22 @@ async def dispatch_reminders(
 
         processed += 1
         item["delivered"] = any(t.get("status") == "ok" for t in tickets)
+        item["tickets"] = [
+            {
+                "status": t.get("status"),
+                "id": t.get("id"),
+                "message": t.get("message"),
+                "details": t.get("details"),
+            }
+            for t in tickets
+        ]
         items.append(item)
+        logger.info(
+            "reminder %s push done delivered=%s tickets=%s",
+            reminder_id,
+            item["delivered"],
+            item["tickets"],
+        )
 
     summary = {
         "now_utc": now.isoformat(),
