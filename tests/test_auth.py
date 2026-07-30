@@ -152,6 +152,32 @@ def test_verify_otp_wrong_code_returns_otp_invalid(client):
     assert r.json()["detail"]["code"] == "otp_invalid"
 
 
+def test_play_review_account_uses_fixed_otp_without_email(client):
+    """Google Play reviewers get a permanent code; no Resend email is sent."""
+    with patch("app.routers.auth.settings.PLAY_REVIEW_EMAIL", "play.review@peto.casa"):
+        with patch("app.routers.auth.settings.PLAY_REVIEW_OTP", "482917"):
+            with patch("app.routers.auth.send_otp_email") as send_otp:
+                with patch("app.routers.auth.firebase_auth.create_user") as create_user:
+                    with patch("app.routers.auth.firebase_auth.create_custom_token") as custom_token:
+                        create_user.return_value = MagicMock(uid="uid_play_review")
+                        custom_token.return_value = b"token-review"
+
+                        r_send = client.post(
+                            "/api/v1/auth/send-otp",
+                            json={"email": "play.review@peto.casa"},
+                        )
+                        assert r_send.status_code == 200, r_send.text
+                        send_otp.assert_not_called()
+
+                        r = client.post(
+                            "/api/v1/auth/verify-otp",
+                            json={"email": "play.review@peto.casa", "otp": "482917"},
+                        )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["custom_token"] == "token-review"
+
+
 def test_users_me_updates_last_login(client):
     r = client.post("/api/v1/users/me", headers={"Authorization": "Bearer token_user_a"})
     assert r.status_code == 200, r.text

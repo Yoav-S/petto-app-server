@@ -6,7 +6,7 @@ POST /auth/verify-otp  — verify OTP, return Firebase custom token
 POST /auth/resend-otp  — resend OTP (20s cooldown)
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from firebase_admin import auth as firebase_auth
@@ -14,6 +14,7 @@ from firebase_admin.auth import EmailAlreadyExistsError, UserNotFoundError
 from google.auth.exceptions import RefreshError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.config import settings
 from app.core.database import get_database
 from app.core.email_service import EmailDeliveryError, send_otp_email
 from app.core.errors import ErrorCode, raise_api_error
@@ -39,10 +40,39 @@ logger = logging.getLogger(__name__)
 _RESEND_MESSAGE = "If this email is valid, a verification code was sent"
 
 
+def _is_play_review_email(email: str) -> bool:
+    if not settings.play_review_configured:
+        return False
+    return email == settings.PLAY_REVIEW_EMAIL.strip().lower()
+
+
 async def _store_and_send_otp(db: AsyncIOMotorDatabase, email: str) -> None:
-    otp_code = generate_otp_code()
     now = datetime.now(timezone.utc)
 
+    # Google Play reviewers need a reusable, non-expiring code (not a mailed OTP).
+    if _is_play_review_email(email):
+        otp_code = settings.PLAY_REVIEW_OTP.strip()
+        expires_at = now + timedelta(days=3650)
+        await db.email_otps.update_one(
+            {"email": email},
+            {
+                "$set": {
+                    "email": email,
+                    "otp_hash": hash_otp(otp_code),
+                    "expires_at": expires_at,
+                    "attempts": 0,
+                    "last_sent_at": now,
+                    "updated_at": now,
+                    "play_review": True,
+                },
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+        logger.info("play-review OTP stored for %s (email not sent)", email)
+        return
+
+    otp_code = generate_otp_code()
     await db.email_otps.update_one(
         {"email": email},
         {
@@ -159,24 +189,28 @@ async def verify_otp(
     if not user:
         raise_api_error(400, ErrorCode.OTP_INVALID)
 
-    otp_doc = await db.email_otps.find_one({"email": email})
-    if not otp_doc:
-        raise_api_error(400, ErrorCode.OTP_INVALID)
+    # Fixed Play review code works even if send-otp was never called / doc expired.
+    if _is_play_review_email(email) and body.otp.strip() == settings.PLAY_REVIEW_OTP.strip():
+        pass
+    else:
+        otp_doc = await db.email_otps.find_one({"email": email})
+        if not otp_doc:
+            raise_api_error(400, ErrorCode.OTP_INVALID)
 
-    if otp_doc.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
-        raise_api_error(429, ErrorCode.OTP_TOO_MANY_ATTEMPTS)
+        if otp_doc.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+            raise_api_error(429, ErrorCode.OTP_TOO_MANY_ATTEMPTS)
 
-    expires_at = otp_doc.get("expires_at")
-    if expires_at:
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
-            raise_api_error(400, ErrorCode.OTP_EXPIRED)
+        expires_at = otp_doc.get("expires_at")
+        if expires_at:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at < datetime.now(timezone.utc):
+                raise_api_error(400, ErrorCode.OTP_EXPIRED)
 
-    if not verify_otp_code(body.otp, otp_doc["otp_hash"]):
-        await db.email_otps.update_one({"email": email}, {"$inc": {"attempts": 1}})
-        logger.info("verify-otp rejected for %s (wrong code)", email)
-        raise_api_error(400, ErrorCode.OTP_INVALID)
+        if not verify_otp_code(body.otp, otp_doc["otp_hash"]):
+            await db.email_otps.update_one({"email": email}, {"$inc": {"attempts": 1}})
+            logger.info("verify-otp rejected for %s (wrong code)", email)
+            raise_api_error(400, ErrorCode.OTP_INVALID)
 
     try:
         firebase_uid = _ensure_firebase_user(email, user.get("firebase_uid"))

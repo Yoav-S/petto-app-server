@@ -49,10 +49,21 @@ class Settings(BaseSettings):
     # Public SDK keys live on the client only (EXPO_PUBLIC_REVENUECAT_*).
     REVENUECAT_WEBHOOK_SECRET: str = ""
     REVENUECAT_API_KEY: str = ""
+
+    # Google Play review login — fixed OTP for one allowlisted email (never expires).
+    # Leave both empty to disable. Set on Cloud Run before Play review.
+    PLAY_REVIEW_EMAIL: str = ""
+    PLAY_REVIEW_OTP: str = ""
     
     @property
     def is_development(self) -> bool:
         return self.APP_ENV == "development"
+
+    @property
+    def play_review_configured(self) -> bool:
+        email = self.PLAY_REVIEW_EMAIL.strip().lower()
+        otp = self.PLAY_REVIEW_OTP.strip()
+        return bool(email and len(otp) == 6 and otp.isdigit())
 
     @property
     def is_production(self) -> bool:
