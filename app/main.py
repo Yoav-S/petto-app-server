@@ -10,10 +10,19 @@ Health check at GET /health (unauthenticated) for Cloud Run probes.
 """
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+# Cloud Run / Docker: ensure app loggers (petto, routers) hit stdout.
+# Without this, only uvicorn access lines show up and dispatch push details are invisible.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 logger = logging.getLogger("petto")
 
 from app.core.database import connect_to_db, close_db_connection
