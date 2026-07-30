@@ -115,6 +115,19 @@ class TestReminderValidation:
         assert r.status_code == 422
         assert r.json()["detail"]["code"] == "reminder_datetime_in_past"
 
+    def test_today_datetime_rejected(self, client):
+        """Cannot schedule a reminder for the current local day — earliest is tomorrow."""
+        from datetime import date
+
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={"title": "Too soon", "date": date.today().isoformat(), "time": "23:59"},
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 422
+        assert r.json()["detail"]["code"] == "reminder_datetime_in_past"
+
 
 class TestVaccinationValidation:
     """Vaccination requires name and date."""
