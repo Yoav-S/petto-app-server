@@ -95,6 +95,11 @@ async def register_push(
             },
             upsert=True,
         )
+        # Drop stale tokens for this user (e.g. old Expo Go installs). Sending to
+        # those opens the wrong app / shows the Expo Go icon on tap.
+        await db.push_tokens.delete_many(
+            {"user_id": uid, "token": {"$ne": body.token}}
+        )
         token_saved = True
 
     logger.info(
