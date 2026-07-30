@@ -139,6 +139,12 @@ async def update_notification_preferences(
     uid = current_user["uid"]
     changes = body.model_dump(exclude_unset=True)
 
+    # Master ON → turn every category on as well (matches client UX).
+    if changes.get("all") is True:
+        for key in DEFAULT_NOTIFICATION_PREFS:
+            if key != "all":
+                changes[key] = True
+
     if changes:
         now = datetime.now(timezone.utc)
         updates = {f"notification_prefs.{key}": value for key, value in changes.items()}
