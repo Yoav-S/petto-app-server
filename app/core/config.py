@@ -51,9 +51,10 @@ class Settings(BaseSettings):
     REVENUECAT_API_KEY: str = ""
 
     # Google Play review login — fixed OTP for one allowlisted email (never expires).
-    # Leave both empty to disable. Set on Cloud Run before Play review.
-    PLAY_REVIEW_EMAIL: str = ""
-    PLAY_REVIEW_OTP: str = ""
+    # Defaults work out of the box for Play Console; override via env if needed.
+    # Set either empty to disable.
+    PLAY_REVIEW_EMAIL: str = "play.review@peto.casa"
+    PLAY_REVIEW_OTP: str = "482917"
     
     @property
     def is_development(self) -> bool:

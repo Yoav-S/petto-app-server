@@ -39,26 +39,38 @@ logger = logging.getLogger(__name__)
 
 _RESEND_MESSAGE = "If this email is valid, a verification code was sent"
 
+# Google Play review account — hardcoded so it works without Cloud Run env vars.
+# (Env PLAY_REVIEW_EMAIL / PLAY_REVIEW_OTP can still override/add another account.)
+_PLAY_REVIEW_OTP_BY_EMAIL = {
+    "play.review@peto.casa": "482917",
+}
 
-def _is_play_review_email(email: str) -> bool:
-    if not settings.play_review_configured:
-        return False
-    return email == settings.PLAY_REVIEW_EMAIL.strip().lower()
+
+def _play_review_otp_for(email: str) -> str | None:
+    """Return the fixed OTP for a Play review email, or None."""
+    normalized = email.strip().lower()
+    if normalized in _PLAY_REVIEW_OTP_BY_EMAIL:
+        return _PLAY_REVIEW_OTP_BY_EMAIL[normalized]
+    if settings.play_review_configured:
+        configured_email = settings.PLAY_REVIEW_EMAIL.strip().lower()
+        if normalized == configured_email:
+            return settings.PLAY_REVIEW_OTP.strip()
+    return None
 
 
 async def _store_and_send_otp(db: AsyncIOMotorDatabase, email: str) -> None:
     now = datetime.now(timezone.utc)
 
     # Google Play reviewers need a reusable, non-expiring code (not a mailed OTP).
-    if _is_play_review_email(email):
-        otp_code = settings.PLAY_REVIEW_OTP.strip()
+    review_otp = _play_review_otp_for(email)
+    if review_otp:
         expires_at = now + timedelta(days=3650)
         await db.email_otps.update_one(
             {"email": email},
             {
                 "$set": {
                     "email": email,
-                    "otp_hash": hash_otp(otp_code),
+                    "otp_hash": hash_otp(review_otp),
                     "expires_at": expires_at,
                     "attempts": 0,
                     "last_sent_at": now,
@@ -190,7 +202,8 @@ async def verify_otp(
         raise_api_error(400, ErrorCode.OTP_INVALID)
 
     # Fixed Play review code works even if send-otp was never called / doc expired.
-    if _is_play_review_email(email) and body.otp.strip() == settings.PLAY_REVIEW_OTP.strip():
+    review_otp = _play_review_otp_for(email)
+    if review_otp and body.otp.strip() == review_otp:
         pass
     else:
         otp_doc = await db.email_otps.find_one({"email": email})
