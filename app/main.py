@@ -43,6 +43,13 @@ from app.routers import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run startup tasks before serving, cleanup on shutdown."""
+    from app.core.config import settings
+
+    logger.info(
+        "Starting Petto API APP_ENV=%s db=%s",
+        settings.APP_ENV,
+        settings.mongodb_db_name,
+    )
     await connect_to_db()
     initialize_firebase()
     resend_key, resend_from, source = resolve_resend_credentials()
