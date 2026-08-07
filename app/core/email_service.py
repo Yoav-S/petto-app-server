@@ -21,14 +21,14 @@ class EmailDeliveryError(Exception):
 
 
 def _otp_email_content(otp_code: str) -> tuple[str, str, str]:
-    subject = "Your peto verification code"
+    subject = "Your Ragly verification code"
     text = (
-        f"Your peto verification code is: {otp_code}\n\n"
+        f"Your verification code is: {otp_code}\n\n"
         f"This code expires in 10 minutes.\n"
         f"If you did not request this, you can ignore this email."
     )
     html = (
-        f"<p>Your peto verification code is:</p>"
+        f"<p>Your verification code is:</p>"
         f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:6px;margin:16px 0\">"
         f"{otp_code}</p>"
         f"<p>This code expires in 10 minutes.</p>"

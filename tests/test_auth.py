@@ -162,14 +162,14 @@ def test_play_review_account_uses_fixed_otp_without_email(client):
 
                 r_send = client.post(
                     "/api/v1/auth/send-otp",
-                    json={"email": "play.review@peto.casa"},
+                    json={"email": "play.review@ragly.cloud"},
                 )
                 assert r_send.status_code == 200, r_send.text
                 send_otp.assert_not_called()
 
                 r = client.post(
                     "/api/v1/auth/verify-otp",
-                    json={"email": "play.review@peto.casa", "otp": "482917"},
+                    json={"email": "play.review@ragly.cloud", "otp": "482917"},
                 )
 
     assert r.status_code == 200, r.text

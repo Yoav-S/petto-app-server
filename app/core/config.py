@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     # Google Play review login — fixed OTP for one allowlisted email (never expires).
     # Defaults work out of the box for Play Console; override via env if needed.
     # Set either empty to disable.
-    PLAY_REVIEW_EMAIL: str = "play.review@peto.casa"
+    PLAY_REVIEW_EMAIL: str = "play.review@ragly.cloud"
     PLAY_REVIEW_OTP: str = "482917"
     
     @property

@@ -42,7 +42,8 @@ _RESEND_MESSAGE = "If this email is valid, a verification code was sent"
 # Google Play review account — hardcoded so it works without Cloud Run env vars.
 # (Env PLAY_REVIEW_EMAIL / PLAY_REVIEW_OTP can still override/add another account.)
 _PLAY_REVIEW_OTP_BY_EMAIL = {
-    "play.review@peto.casa": "482917",
+    "play.review@ragly.cloud": "482917",
+    "play.review@peto.casa": "482917",  # legacy alias
 }
 
 

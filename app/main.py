@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     from app.core.config import settings
 
     logger.info(
-        "Starting Petto API APP_ENV=%s db=%s",
+        "Starting Ragly API APP_ENV=%s db=%s",
         settings.APP_ENV,
         settings.mongodb_db_name,
     )
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Petto API",
+    title="Ragly API",
     version="1.0.0",
     description="Simple, reliable data storage for pet medical history.",
     lifespan=lifespan,
