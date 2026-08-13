@@ -6,6 +6,8 @@ from pydantic import BaseModel, EmailStr, Field
 
 class SendOtpRequest(BaseModel):
     email: EmailStr
+    # App/device language for the OTP email (en|he|ro|ru).
+    locale: str | None = Field(default=None, max_length=16)
 
 
 class VerifyOtpRequest(BaseModel):
@@ -15,6 +17,7 @@ class VerifyOtpRequest(BaseModel):
 
 class ResendOtpRequest(BaseModel):
     email: EmailStr
+    locale: str | None = Field(default=None, max_length=16)
 
 
 class AuthMessageResponse(BaseModel):

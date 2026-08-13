@@ -59,7 +59,11 @@ def _play_review_otp_for(email: str) -> str | None:
     return None
 
 
-async def _store_and_send_otp(db: AsyncIOMotorDatabase, email: str) -> None:
+async def _store_and_send_otp(
+    db: AsyncIOMotorDatabase,
+    email: str,
+    locale: str | None = None,
+) -> None:
     now = datetime.now(timezone.utc)
 
     # Google Play reviewers need a reusable, non-expiring code (not a mailed OTP).
@@ -102,7 +106,7 @@ async def _store_and_send_otp(db: AsyncIOMotorDatabase, email: str) -> None:
         upsert=True,
     )
     try:
-        send_otp_email(email, otp_code)
+        send_otp_email(email, otp_code, locale=locale)
     except EmailDeliveryError:
         raise_api_error(500, ErrorCode.EMAIL_SEND_FAILED)
 
@@ -159,7 +163,7 @@ async def send_otp(
             upsert=True,
         )
 
-        await _store_and_send_otp(db, email)
+        await _store_and_send_otp(db, email, locale=body.locale)
     except HTTPException:
         raise
     except Exception:
@@ -272,7 +276,7 @@ async def resend_otp(
 
     _raise_resend_cooldown(otp_doc)
     try:
-        await _store_and_send_otp(db, email)
+        await _store_and_send_otp(db, email, locale=body.locale)
     except HTTPException:
         raise
     except Exception:

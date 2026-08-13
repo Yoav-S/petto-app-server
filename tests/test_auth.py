@@ -19,6 +19,31 @@ def test_resend_sends_otp_email():
             assert payload["to"] == ["user@test.com"]
             assert "123456" in payload["text"]
             assert "123456" in payload["html"]
+            assert "Ragly" in payload["subject"]
+            assert "Ragly" in payload["text"]
+            assert "peto" not in payload["text"].lower()
+            assert "peto" not in payload["html"].lower()
+
+
+def test_otp_email_localizes_for_hebrew():
+    from app.core.email_service import _otp_email_content
+
+    subject, text, html = _otp_email_content("654321", locale="he")
+    assert "Ragly" in subject
+    assert "654321" in text
+    assert "dir=\"rtl\"" in html
+    assert "אפליקציית Ragly" in text
+
+
+def test_send_otp_forwards_locale(client):
+    with patch("app.routers.auth.send_otp_email") as send_otp:
+        r = client.post(
+            "/api/v1/auth/send-otp",
+            json={"email": "locale@test.com", "locale": "ru"},
+        )
+    assert r.status_code == 200, r.text
+    send_otp.assert_called_once()
+    assert send_otp.call_args.kwargs.get("locale") == "ru"
 
 
 def test_send_otp_creates_pending_user(client):
@@ -122,7 +147,7 @@ def test_verify_otp_accepts_leading_zero_code(client):
                     custom_token.return_value = b"token-lz"
 
                     client.post("/api/v1/auth/send-otp", json={"email": "leading@test.com"})
-                    send_otp.assert_called_with("leading@test.com", "027485")
+                    send_otp.assert_called_with("leading@test.com", "027485", locale=None)
 
                     r = client.post(
                         "/api/v1/auth/verify-otp",
