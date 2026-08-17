@@ -93,7 +93,8 @@ async def update_pet(
     """
     Partial update of pet fields.
     Only fields that are explicitly provided are updated
-    (exclude_unset=True prevents overwriting with None).
+    (exclude_unset=True). Pass JSON null to clear nullable fields
+    such as photo_url.
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
 
