@@ -15,8 +15,9 @@ Tab filtering:
   upcoming → date >  today, scheduled
   recent   → completed | missed | (date < today AND scheduled)
 
-Create/update API rejects today and past dates (earliest = tomorrow). Status
-tests that need today/past rows create a valid future reminder, then backdate
+Create/update API rejects past date/times (today is allowed if the time
+is still ahead). Status tests that need today/past rows create a valid
+future reminder, then backdate the stored date.
 the document in the DB.
 """
 import pytest

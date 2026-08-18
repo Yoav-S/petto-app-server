@@ -81,17 +81,17 @@ async def _assert_future_datetime(
 ) -> None:
     """Reject unschedulable reminder date/times.
 
-    Product rule: newly chosen dates must be *after* the user's local today
-    (earliest = tomorrow). Keeping an already-stored today/past date (title
-    edits, status flows) is allowed; moving onto today or earlier is not.
-    The concrete local date+time must still be in the future.
+    Product rule: newly chosen dates cannot be before the user's local today.
+    Today is allowed when the local date+time is still in the future.
+    Keeping an already-stored today/past date (title edits, status flows) is
+    allowed; moving onto a past date is not.
     """
     user = await db.users.find_one({"firebase_uid": uid})
     tz_name = (user or {}).get("timezone")
     tz = resolve_timezone(tz_name)
     today_str = datetime.now(tz).date().isoformat()
     date_is_new = previous_date is None or date != previous_date
-    if date_is_new and date <= today_str:
+    if date_is_new and date < today_str:
         raise_api_error(422, ErrorCode.REMINDER_DATETIME_IN_PAST)
 
     scheduled_at = compute_scheduled_at(date, time, tz_name)

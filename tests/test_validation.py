@@ -115,14 +115,32 @@ class TestReminderValidation:
         assert r.status_code == 422
         assert r.json()["detail"]["code"] == "reminder_datetime_in_past"
 
-    def test_today_datetime_rejected(self, client):
-        """Cannot schedule a reminder for the current local day — earliest is tomorrow."""
-        from datetime import date
+    def test_today_future_time_accepted(self, client):
+        """Today is allowed when the local time is still in the future."""
+        from datetime import date, datetime
 
         pet = make_pet(client, HEADERS_A)
+        now = datetime.now()
+        if now.hour == 23 and now.minute >= 59:
+            return
         r = client.post(
             f"/api/v1/pets/{pet['id']}/reminders",
-            json={"title": "Too soon", "date": date.today().isoformat(), "time": "23:59"},
+            json={"title": "Later today", "date": date.today().isoformat(), "time": "23:59"},
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 201
+
+    def test_today_past_time_rejected(self, client):
+        """Today is rejected when the chosen time has already passed."""
+        from datetime import date, datetime
+
+        pet = make_pet(client, HEADERS_A)
+        now = datetime.now()
+        if now.hour == 0 and now.minute == 0:
+            return
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={"title": "Too late today", "date": date.today().isoformat(), "time": "00:00"},
             headers=HEADERS_A,
         )
         assert r.status_code == 422
