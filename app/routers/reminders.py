@@ -79,10 +79,9 @@ async def _assert_future_datetime(
     *,
     previous_date: str | None = None,
 ) -> None:
-    """Reject unschedulable reminder date/times.
+    """Reject dates before the user's local today.
 
-    Product rule: newly chosen dates cannot be before the user's local today.
-    Today is allowed when the local date+time is still in the future.
+    Today is always allowed (any clock time). Past calendar days are not.
     Keeping an already-stored today/past date (title edits, status flows) is
     allowed; moving onto a past date is not.
     """
@@ -94,10 +93,7 @@ async def _assert_future_datetime(
     if date_is_new and date < today_str:
         raise_api_error(422, ErrorCode.REMINDER_DATETIME_IN_PAST)
 
-    scheduled_at = compute_scheduled_at(date, time, tz_name)
-    if not scheduled_at:
-        raise_api_error(422, ErrorCode.REMINDER_DATETIME_IN_PAST)
-    if scheduled_at <= datetime.now(timezone.utc):
+    if not compute_scheduled_at(date, time, tz_name):
         raise_api_error(422, ErrorCode.REMINDER_DATETIME_IN_PAST)
 
 

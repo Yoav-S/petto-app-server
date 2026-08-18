@@ -130,21 +130,17 @@ class TestReminderValidation:
         )
         assert r.status_code == 201
 
-    def test_today_past_time_rejected(self, client):
-        """Today is rejected when the chosen time has already passed."""
-        from datetime import date, datetime
+    def test_today_past_time_accepted(self, client):
+        """Today is allowed even when the chosen time has already passed."""
+        from datetime import date
 
         pet = make_pet(client, HEADERS_A)
-        now = datetime.now()
-        if now.hour == 0 and now.minute == 0:
-            return
         r = client.post(
             f"/api/v1/pets/{pet['id']}/reminders",
-            json={"title": "Too late today", "date": date.today().isoformat(), "time": "00:00"},
+            json={"title": "Today anyway", "date": date.today().isoformat(), "time": "00:00"},
             headers=HEADERS_A,
         )
-        assert r.status_code == 422
-        assert r.json()["detail"]["code"] == "reminder_datetime_in_past"
+        assert r.status_code == 201
 
 
 class TestVaccinationValidation:
