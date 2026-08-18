@@ -62,6 +62,12 @@ class MedicalRecordStatusUpdate(BaseModel):
     status: str = Field(..., pattern="^resolved$")
 
 
+class MedicalRecordUpdate(BaseModel):
+    """Used by PATCH .../{id} — title and/or description."""
+    title: Optional[str] = Field(None, max_length=300)
+    description: Optional[str] = Field(None, max_length=300)
+
+
 class MedicalRecordOut(BaseModel):
     id: str
     pet_id: str

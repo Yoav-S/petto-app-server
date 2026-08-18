@@ -5,6 +5,7 @@ Route structure:
   GET    /pets/{pet_id}/medical-records?status=active|resolved
   POST   /pets/{pet_id}/medical-records
   GET    /pets/{pet_id}/medical-records/{id}
+  PATCH  /pets/{pet_id}/medical-records/{id}
   PATCH  /pets/{pet_id}/medical-records/{id}/status
   DELETE /pets/{pet_id}/medical-records/{id}
 
@@ -38,6 +39,7 @@ from app.core.utils import (
 from app.middleware.auth import get_current_user
 from app.models.medical_record import (
     MedicalRecordCreate,
+    MedicalRecordUpdate,
     MedicalRecordStatusUpdate,
     MedicalRecordOut,
     MedicalRecordDetailOut,
@@ -276,6 +278,42 @@ async def list_record_notes(
     if limit:
         docs = docs[:limit]
     return [await _build_note_out(n, db) for n in docs]
+
+
+# ---------------------------------------------------------------------------
+# Update medical record (title / description)
+# ---------------------------------------------------------------------------
+
+@router.patch("/{record_id}", response_model=MedicalRecordOut)
+async def update_medical_record(
+    pet_id: str,
+    record_id: str,
+    body: MedicalRecordUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Update a health condition's title and/or description."""
+    await validate_pet_ownership(pet_id, current_user["uid"], db)
+    await validate_entity_ownership("medical_records", record_id, pet_id, db)
+
+    updates = body.model_dump(exclude_unset=True)
+    if "title" in updates:
+        title = (updates["title"] or "").strip()
+        if not title:
+            raise_api_error(422, ErrorCode.NO_FIELDS_TO_UPDATE)
+        updates["title"] = title
+    if "description" in updates:
+        updates["description"] = (updates["description"] or "").strip() or None
+
+    if not updates:
+        raise_api_error(422, ErrorCode.NO_FIELDS_TO_UPDATE)
+
+    await db.medical_records.update_one(
+        {"_id": ObjectId(record_id)},
+        {"$set": updates},
+    )
+    updated = await db.medical_records.find_one({"_id": ObjectId(record_id)})
+    return await _enrich_record(updated, db)
 
 
 # ---------------------------------------------------------------------------
