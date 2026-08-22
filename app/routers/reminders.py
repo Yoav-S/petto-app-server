@@ -14,6 +14,7 @@ the linked_reminder_id as a historical reference (the reminder display
 will simply not resolve). This is intentional: notes are the primary record.
 """
 from fastapi import APIRouter, Depends, Query
+from typing import Optional
 from app.core.errors import ErrorCode, raise_api_error
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -121,6 +122,8 @@ async def _user_today_str(uid: str, db: AsyncIOMotorDatabase) -> str:
 async def list_reminders(
     pet_id: str,
     tab: str = Query("today", pattern="^(today|upcoming|recent)$"),
+    limit: Optional[int] = Query(None, ge=1, le=50),
+    cursor: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
@@ -129,12 +132,33 @@ async def list_reminders(
     Sorting:
       today/upcoming → soonest first (date ASC)
       recent         → most recent first (date DESC)
+    Pagination: pass limit + cursor (last item id) for the next page.
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
     today_str = await _user_today_str(current_user["uid"], db)
     query = build_reminder_tab_query(pet_id, tab, today_str)
     sort_dir = 1 if tab in ("today", "upcoming") else -1
-    docs = await db.reminders.find(query, sort=[("date", sort_dir)]).to_list(None)
+    sort = [("date", sort_dir), ("_id", sort_dir)]
+
+    if cursor and is_valid_object_id(cursor):
+        last = await db.reminders.find_one({"_id": ObjectId(cursor)})
+        if last:
+            last_date = last.get("date")
+            last_id = ObjectId(cursor)
+            if sort_dir == 1:
+                query["$or"] = [
+                    {"date": {"$gt": last_date}},
+                    {"date": last_date, "_id": {"$gt": last_id}},
+                ]
+            else:
+                query["$or"] = [
+                    {"date": {"$lt": last_date}},
+                    {"date": last_date, "_id": {"$lt": last_id}},
+                ]
+
+    docs = await db.reminders.find(query, sort=sort).to_list(limit or None)
+    if limit:
+        docs = docs[:limit]
     return [_enrich(d, today_str) for d in docs]
 
 

@@ -23,11 +23,11 @@ Design notes:
 import logging
 
 from fastapi import APIRouter, Depends, Query
+from typing import Optional
 from app.core.errors import ErrorCode, raise_api_error
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime, timezone
-from typing import Optional
 
 from app.core.database import get_database
 from app.core.utils import (
@@ -221,17 +221,20 @@ async def create_medical_record(
 async def get_medical_record(
     pet_id: str,
     record_id: str,
+    notes_limit: Optional[int] = Query(None, ge=1, le=50),
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Return a condition with all its health notes, newest first."""
+    """Return a condition with its health notes (newest first). Pass notes_limit to page."""
     await validate_pet_ownership(pet_id, current_user["uid"], db)
     record = await validate_entity_ownership("medical_records", record_id, pet_id, db)
 
     note_docs = await db.health_notes.find(
         {"medical_record_id": record_id},
-        sort=[("created_at", -1)],
-    ).to_list(None)
+        sort=[("_id", -1)],
+    ).to_list(notes_limit or None)
+    if notes_limit:
+        note_docs = note_docs[:notes_limit]
 
     notes = [await _build_note_out(n, db) for n in note_docs]
     d = doc_to_dict(record)

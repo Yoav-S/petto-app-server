@@ -10,7 +10,8 @@ Key behaviors:
   - `date` (vaccinated on) cannot be after the user's local today.
   - `next_date` (valid until) cannot be before `date`.
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from typing import Optional
 from app.core.errors import ErrorCode, raise_api_error
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -23,6 +24,7 @@ from app.core.utils import (
     validate_pet_ownership,
     validate_entity_ownership,
     compute_vaccination_status,
+    is_valid_object_id,
 )
 from app.middleware.auth import get_current_user
 from app.models.vaccination import VaccinationCreate, VaccinationUpdate, VaccinationOut
@@ -63,14 +65,29 @@ def _validate_vaccination_dates(
 @router.get("", response_model=list[VaccinationOut])
 async def list_vaccinations(
     pet_id: str,
+    limit: Optional[int] = Query(None, ge=1, le=50),
+    cursor: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Return all vaccinations for a pet, newest first."""
+    """Return vaccinations for a pet, newest first. Pagination via limit + cursor (last id)."""
     await validate_pet_ownership(pet_id, current_user["uid"], db)
-    docs = await db.vaccinations.find(
-        {"pet_id": pet_id}, sort=[("date", -1)]
-    ).to_list(None)
+    query: dict = {"pet_id": pet_id}
+    sort = [("date", -1), ("_id", -1)]
+
+    if cursor and is_valid_object_id(cursor):
+        last = await db.vaccinations.find_one({"_id": ObjectId(cursor)})
+        if last:
+            last_date = last.get("date")
+            last_id = ObjectId(cursor)
+            query["$or"] = [
+                {"date": {"$lt": last_date}},
+                {"date": last_date, "_id": {"$lt": last_id}},
+            ]
+
+    docs = await db.vaccinations.find(query, sort=sort).to_list(limit or None)
+    if limit:
+        docs = docs[:limit]
     return [_enrich(d) for d in docs]
 
 
