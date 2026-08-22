@@ -200,7 +200,7 @@ class TestHealthNoteValidation:
 
 
 class TestMedicalRecordStatusValidation:
-    """Status PATCH only accepts 'resolved'."""
+    """Status PATCH accepts active ↔ resolved."""
 
     def test_invalid_status_value_rejected(self, client):
         pet = make_pet(client, HEADERS_A)
@@ -212,7 +212,43 @@ class TestMedicalRecordStatusValidation:
         record_id = r_record.json()["id"]
         r = client.patch(
             f"/api/v1/pets/{pet['id']}/medical-records/{record_id}/status",
-            json={"status": "active"},  # only "resolved" accepted
+            json={"status": "pending"},
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 422
+
+    def test_reopen_resolved_record(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r_record = client.post(
+            f"/api/v1/pets/{pet['id']}/medical-records",
+            json={"title": "Allergy"},
+            headers=HEADERS_A,
+        )
+        record_id = r_record.json()["id"]
+        client.patch(
+            f"/api/v1/pets/{pet['id']}/medical-records/{record_id}/status",
+            json={"status": "resolved"},
+            headers=HEADERS_A,
+        )
+        r = client.patch(
+            f"/api/v1/pets/{pet['id']}/medical-records/{record_id}/status",
+            json={"status": "active"},
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "active"
+
+    def test_reopening_active_record_rejected(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r_record = client.post(
+            f"/api/v1/pets/{pet['id']}/medical-records",
+            json={"title": "Allergy"},
+            headers=HEADERS_A,
+        )
+        record_id = r_record.json()["id"]
+        r = client.patch(
+            f"/api/v1/pets/{pet['id']}/medical-records/{record_id}/status",
+            json={"status": "active"},
             headers=HEADERS_A,
         )
         assert r.status_code == 422

@@ -14,7 +14,7 @@ Route structure:
   DELETE /pets/{pet_id}/medical-records/{id}/notes/{note_id}
 
 Design notes:
-  - MedicalRecord has status "active" | "resolved". Only active→resolved allowed.
+  - MedicalRecord has status "active" | "resolved". active ↔ resolved allowed.
   - HealthNote can have optional photo_url and linked_reminder_id.
   - List endpoint enriches each record with latest_note_preview and
     linked_reminder_time for the home screen / list cards.
@@ -329,22 +329,32 @@ async def update_medical_record_status(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
-    Mark a health condition as resolved.
-    Only active → resolved is allowed; resolved conditions cannot be re-opened.
+    Update a health condition status: active → resolved, or resolved → active (reopen).
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
     record = await validate_entity_ownership("medical_records", record_id, pet_id, db)
 
-    if record.get("status") == "resolved":
-        raise_api_error(422, ErrorCode.ALREADY_RESOLVED)
+    current = record.get("status")
+    target = body.status
 
-    now = datetime.now(timezone.utc)
-    await db.medical_records.update_one(
-        {"_id": ObjectId(record_id)},
-        {"$set": {"status": "resolved", "resolved_at": now}},
-    )
-    # Resolved health items should stop nagging the user — cancel linked reminders.
-    await _cancel_reminders_for_record(record_id, db)
+    if current == target:
+        if target == "resolved":
+            raise_api_error(422, ErrorCode.ALREADY_RESOLVED)
+        raise_api_error(422, ErrorCode.FAILED_TO_SAVE)
+
+    if target == "resolved":
+        now = datetime.now(timezone.utc)
+        await db.medical_records.update_one(
+            {"_id": ObjectId(record_id)},
+            {"$set": {"status": "resolved", "resolved_at": now}},
+        )
+        await _cancel_reminders_for_record(record_id, db)
+    else:
+        await db.medical_records.update_one(
+            {"_id": ObjectId(record_id)},
+            {"$set": {"status": "active"}, "$unset": {"resolved_at": ""}},
+        )
+
     updated = await db.medical_records.find_one({"_id": ObjectId(record_id)})
     return await _enrich_record(updated, db)
 

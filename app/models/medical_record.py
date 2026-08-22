@@ -58,8 +58,8 @@ class MedicalRecordCreate(BaseModel):
 
 
 class MedicalRecordStatusUpdate(BaseModel):
-    """Used by PATCH .../status — only transition allowed is active → resolved."""
-    status: str = Field(..., pattern="^resolved$")
+    """Used by PATCH .../status — active ↔ resolved."""
+    status: str = Field(..., pattern="^(active|resolved)$")
 
 
 class MedicalRecordUpdate(BaseModel):
