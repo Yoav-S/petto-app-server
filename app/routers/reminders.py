@@ -51,27 +51,6 @@ from app.models.reminder import (
 router = APIRouter(prefix="/pets/{pet_id}/reminders", tags=["reminders"])
 
 
-async def _assert_unique_datetime(
-    pet_id: str,
-    date: str,
-    time: str,
-    db: AsyncIOMotorDatabase,
-    *,
-    exclude_reminder_id: str | None = None,
-) -> None:
-    """Reject another scheduled reminder on the same pet at the same local date+time."""
-    query: dict = {
-        "pet_id": pet_id,
-        "date": date,
-        "time": time,
-        "status": "scheduled",
-    }
-    if exclude_reminder_id and is_valid_object_id(exclude_reminder_id):
-        query["_id"] = {"$ne": ObjectId(exclude_reminder_id)}
-    if await db.reminders.find_one(query):
-        raise_api_error(409, ErrorCode.DUPLICATE_REMINDER_DATETIME)
-
-
 async def _assert_future_datetime(
     uid: str,
     date: str,
@@ -104,6 +83,8 @@ def _enrich(doc: dict, today_str: str | None = None) -> ReminderOut:
     d["status"] = compute_reminder_status(
         d.get("date", ""), d.get("status", "scheduled"), today_str
     )
+    if not d.get("category"):
+        d["category"] = "general"
     return ReminderOut(**d)
 
 
@@ -185,7 +166,6 @@ async def create_reminder(
             raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_REMINDER)
 
     await _assert_future_datetime(uid, body.date, body.time, db)
-    await _assert_unique_datetime(pet_id, body.date, body.time, db)
     doc = {
         **body.model_dump(),
         "pet_id": pet_id,
@@ -246,13 +226,6 @@ async def update_reminder(
             next_time,
             db,
             previous_date=existing.get("date"),
-        )
-        await _assert_unique_datetime(
-            pet_id,
-            next_date,
-            next_time,
-            db,
-            exclude_reminder_id=reminder_id,
         )
 
     await db.reminders.update_one(

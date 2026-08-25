@@ -367,8 +367,8 @@ async def dispatch_reminders(
         messages = [
             {
                 "to": token,
-                "title": pet.get("name") or "Ragly reminder",
-                "body": reminder.get("title", "Reminder"),
+                "title": "Reminder",
+                "body": reminder.get("title") or "Reminder",
                 "sound": "default",
                 "channelId": "default",
                 "priority": "high",

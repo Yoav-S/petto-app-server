@@ -3,6 +3,7 @@ reminder.py — Pydantic models for the Reminder entity.
 
 Key design decisions (from screen analysis):
   - `type` field: DROPPED. Reminders use free-text `title` only.
+  - Optional `category` for UI icons (general / medication / …).
   - `repeat` enum matches exactly the options shown in the Figma repeat picker.
   - `time` is stored separately from `date` as "HH:MM" string.
   - `status` returned by API is server-computed; stored_status in DB is
@@ -25,6 +26,14 @@ ReminderRepeat = Literal[
     "every_year",
 ]
 
+ReminderCategory = Literal[
+    "general",
+    "medication",
+    "vaccination",
+    "appointment",
+    "observation",
+]
+
 
 class ReminderCreate(BaseModel):
     title: str = Field(..., max_length=300)
@@ -32,6 +41,7 @@ class ReminderCreate(BaseModel):
     time: str = Field(..., pattern=r"^\d{2}:\d{2}$")  # "HH:MM"
     repeat: ReminderRepeat = "off"
     note: Optional[str] = Field(None, max_length=300)
+    category: ReminderCategory = "general"
 
 
 class ReminderUpdate(BaseModel):
@@ -40,6 +50,7 @@ class ReminderUpdate(BaseModel):
     time: Optional[str] = Field(None, pattern=r"^\d{2}:\d{2}$")
     repeat: Optional[ReminderRepeat] = None
     note: Optional[str] = Field(None, max_length=300)
+    category: Optional[ReminderCategory] = None
 
 
 class ReminderStatusUpdate(BaseModel):
@@ -58,6 +69,7 @@ class ReminderOut(BaseModel):
     time: str
     repeat: str
     note: Optional[str]
+    category: str = "general"
     # Server-computed display status: "today" | "scheduled" | "missed" | "completed"
     status: str
     created_at: datetime

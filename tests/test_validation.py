@@ -88,8 +88,8 @@ class TestReminderValidation:
         )
         assert r.status_code == 422
 
-    def test_duplicate_datetime_rejected(self, client):
-        """Two scheduled reminders cannot share the same date+time on one pet."""
+    def test_duplicate_datetime_allowed(self, client):
+        """Multiple reminders may share the same date+time on one pet."""
         pet = make_pet(client, HEADERS_A)
         payload = {"title": "Morning meds", "date": "2099-06-01", "time": "09:00"}
         first = client.post(
@@ -101,8 +101,8 @@ class TestReminderValidation:
             json={"title": "Other task", "date": "2099-06-01", "time": "09:00"},
             headers=HEADERS_A,
         )
-        assert second.status_code == 409
-        assert second.json()["detail"]["code"] == "duplicate_reminder_datetime"
+        assert second.status_code == 201
+        assert second.json()["id"] != first.json()["id"]
 
     def test_past_datetime_rejected(self, client):
         """Cannot schedule a reminder in the past."""
