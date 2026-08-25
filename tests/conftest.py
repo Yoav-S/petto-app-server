@@ -3,19 +3,24 @@ conftest.py — Shared test fixtures for all test files.
 
 Strategy:
   - Use a thin async wrapper around mongomock's synchronous client.
-    Motor's awaitable API (find_one, insert_one, etc.) is replicated via
-    AsyncWrapper so that routers that do `await db.pets.insert_one(...)` work.
-  - Override the get_database() FastAPI dependency to return the mock DB.
+  - Override get_database() so route handlers never touch real Mongo.
+  - Patch app lifespan connect_to_db / close_db_connection / Firebase so
+    TestClient startup cannot open petto_dev (or any real database).
   - Patch verify_firebase_token to return a fixed uid without network calls.
 
 Two users are pre-defined:
   USER_A_UID = "uid_user_a"
   USER_B_UID = "uid_user_b"
 """
-import asyncio
+import os
+
+# Keep settings away from real DB names if anything still reads them in tests.
+os.environ.setdefault("APP_ENV", "test")
+os.environ["MONGODB_DB_NAME"] = "petto_test_never_use_real"
+
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import mongomock
 
 from app.main import app
@@ -102,6 +107,9 @@ class AsyncCollection:
     async def count_documents(self, *args, **kwargs):
         return self._col.count_documents(*args, **kwargs)
 
+    def aggregate(self, pipeline, *args, **kwargs):
+        return AsyncCursor(self._col.aggregate(pipeline, *args, **kwargs))
+
 
 class AsyncDatabase:
     """Wraps a mongomock Database, returning AsyncCollection on attribute access."""
@@ -136,6 +144,7 @@ def client(mock_db):
     FastAPI TestClient with:
       - get_database() returning mock_db
       - verify_firebase_token patched to map TOKEN_A → USER_A_UID, TOKEN_B → USER_B_UID
+      - real Mongo / Firebase startup disabled (no petto_dev connection)
     """
     def mock_verify(token: str) -> dict:
         mapping = {TOKEN_A: USER_A_UID, TOKEN_B: USER_B_UID}
@@ -147,9 +156,11 @@ def client(mock_db):
     app.dependency_overrides[get_database] = lambda: mock_db
 
     with patch("app.middleware.auth.verify_firebase_token", side_effect=mock_verify):
-        with patch("app.core.firebase.initialize_firebase"):
-            with TestClient(app) as c:
-                yield c
+        with patch("app.main.initialize_firebase"):
+            with patch("app.main.connect_to_db", new_callable=AsyncMock):
+                with patch("app.main.close_db_connection", new_callable=AsyncMock):
+                    with TestClient(app) as c:
+                        yield c
 
     app.dependency_overrides.clear()
 

@@ -40,8 +40,8 @@ class HealthNoteOut(BaseModel):
     id: str
     medical_record_id: str
     text: str
-    photo_url: Optional[str]
-    linked_reminder_id: Optional[str]
+    photo_url: Optional[str] = None
+    linked_reminder_id: Optional[str] = None
     # Flattened reminder display fields (populated when linked_reminder_id is set)
     linked_reminder_date: Optional[str] = None   # "YYYY-MM-DD"
     linked_reminder_time: Optional[str] = None   # "HH:MM"
@@ -75,7 +75,8 @@ class MedicalRecordOut(BaseModel):
     description: Optional[str] = None
     status: str                                  # "active" | "resolved"
     created_at: datetime
-    resolved_at: Optional[datetime]
+    # Default None so reopen / legacy docs missing the key still serialize.
+    resolved_at: Optional[datetime] = None
     # Preview fields for list cards (populated server-side)
     latest_note_preview: Optional[str] = None   # first 100 chars of latest note
     latest_note_id: Optional[str] = None        # id of the newest note (for edit deep-links)
