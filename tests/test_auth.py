@@ -32,7 +32,8 @@ def test_otp_email_localizes_for_hebrew():
     assert "Ragly" in subject
     assert "654321" in text
     assert "dir=\"rtl\"" in html
-    assert "אפליקציית Ragly" in text
+    assert "Ragly" in text
+    assert "ב-Ragly" in text
 
 
 def test_send_otp_forwards_locale(client):

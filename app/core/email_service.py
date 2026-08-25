@@ -21,25 +21,25 @@ _SUPPORTED_LOCALES = frozenset({"en", "he", "ro", "ru"})
 _OTP_COPY: dict[str, dict[str, str]] = {
     "en": {
         "subject": "Your Ragly verification code",
-        "intro": "Your verification code for the Ragly app is:",
+        "intro": "Your Ragly verification code is:",
         "expires": "This code expires in 10 minutes.",
         "ignore": "If you did not request this code, you can safely ignore this email.",
     },
     "he": {
         "subject": "קוד האימות שלך ב-Ragly",
-        "intro": "קוד האימות שלך לאפליקציית Ragly הוא:",
+        "intro": "קוד האימות שלך ב-Ragly הוא:",
         "expires": "הקוד בתוקף ל-10 דקות.",
         "ignore": "אם לא ביקשת את הקוד הזה, אפשר להתעלם מהמייל בבטחה.",
     },
     "ro": {
         "subject": "Codul tău de verificare Ragly",
-        "intro": "Codul tău de verificare pentru aplicația Ragly este:",
+        "intro": "Codul tău de verificare Ragly este:",
         "expires": "Acest cod expiră în 10 minute.",
         "ignore": "Dacă nu ai solicitat acest cod, poți ignora acest e-mail în siguranță.",
     },
     "ru": {
         "subject": "Ваш код подтверждения Ragly",
-        "intro": "Ваш код подтверждения для приложения Ragly:",
+        "intro": "Ваш код подтверждения Ragly:",
         "expires": "Срок действия кода — 10 минут.",
         "ignore": "Если вы не запрашивали этот код, просто проигнорируйте это письмо.",
     },
