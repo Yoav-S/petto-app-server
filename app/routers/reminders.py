@@ -59,22 +59,20 @@ async def _assert_future_datetime(
     *,
     previous_date: str | None = None,
 ) -> None:
-    """Reject dates before the user's local today.
+    """Allow today and future dates. Reject only calendar days before today.
 
-    Today is always allowed (any clock time). Past calendar days are not.
-    Keeping an already-stored today/past date (title edits, status flows) is
-    allowed; moving onto a past date is not.
-
-    Uses the earlier of (user-tz today, UTC today) so a device/timezone skew
-    around midnight cannot block creating a same-day reminder.
+    Same-day reminders are always allowed at any clock time.
     """
     user = await db.users.find_one({"firebase_uid": uid})
     tz_name = (user or {}).get("timezone")
     tz = resolve_timezone(tz_name)
     date_norm = (date or "")[:10]
-    today_user = datetime.now(tz).date()
-    today_utc = datetime.now(timezone.utc).date()
-    min_today = min(today_user, today_utc).isoformat()
+    # Earliest of user-local / UTC today — never treat "today on the phone"
+    # as a past date because of timezone skew.
+    min_today = min(
+        datetime.now(tz).date(),
+        datetime.now(timezone.utc).date(),
+    ).isoformat()
     date_is_new = previous_date is None or date_norm != (previous_date or "")[:10]
     if date_is_new and date_norm < min_today:
         raise_api_error(422, ErrorCode.REMINDER_DATETIME_IN_PAST)
@@ -177,6 +175,8 @@ async def create_reminder(
         if active >= FREE_MAX_ACTIVE_REMINDERS:
             raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_REMINDER)
 
+    # Today (any time) and future dates are allowed. Only reject calendar days
+    # before the user's today — never block same-day creates.
     await _assert_future_datetime(uid, body.date, body.time, db)
     doc = {
         **body.model_dump(),

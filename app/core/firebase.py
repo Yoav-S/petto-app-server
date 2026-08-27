@@ -104,7 +104,17 @@ def initialize_firebase() -> None:
         return
 
     try:
-        assert_firebase_credentials_valid()
+        # Prefer a fully-valid SA (can mint Google tokens). If the key can only
+        # verify ID tokens (common with a stale local .env copy), still init so
+        # Bearer auth works for local API development.
+        try:
+            assert_firebase_credentials_valid()
+        except Exception as cred_exc:
+            logger.warning(
+                "Firebase SA refresh failed (%s); initializing for ID-token "
+                "verify only (OTP mint / admin APIs may fail).",
+                cred_exc,
+            )
         cred = credentials.Certificate(build_firebase_service_account_info())
         _app = firebase_admin.initialize_app(cred)
         logger.info("Firebase Admin initialized for project %s", settings.FIREBASE_PROJECT_ID)
