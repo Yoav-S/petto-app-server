@@ -81,28 +81,48 @@ async def _assert_future_datetime(
         raise_api_error(422, ErrorCode.FAILED_TO_SAVE)
 
 
-def _enrich(doc: dict, today_str: str | None = None) -> ReminderOut:
+def _enrich(
+    doc: dict,
+    today_str: str | None = None,
+    *,
+    now_hm: str | None = None,
+) -> ReminderOut:
     """Attach server-computed status to a reminder document (in the user's tz)."""
     d = doc_to_dict(doc)
     d["status"] = compute_reminder_status(
-        d.get("date", ""), d.get("status", "scheduled"), today_str
+        d.get("date", ""),
+        d.get("status", "scheduled"),
+        today_str,
+        reminder_time_str=d.get("time"),
+        now_hm=now_hm,
     )
     if not d.get("category"):
         d["category"] = "general"
     return ReminderOut(**d)
 
 
-async def _user_today_str(uid: str, db: AsyncIOMotorDatabase) -> str:
-    """Return effective 'today' for list/status (earlier of user-tz and UTC).
-
-    Matches `_assert_future_datetime` so a same-day reminder the client just
-    created always lands on the Today tab even with mild timezone skew.
-    """
+async def _user_local_clock(
+    uid: str, db: AsyncIOMotorDatabase
+) -> tuple[str, str]:
+    """Return (today YYYY-MM-DD, now HH:MM) in the user's timezone floor vs UTC."""
     user = await db.users.find_one({"firebase_uid": uid})
     tz = resolve_timezone((user or {}).get("timezone"))
-    today_user = datetime.now(tz).date()
-    today_utc = datetime.now(timezone.utc).date()
-    return min(today_user, today_utc).isoformat()
+    now_user = datetime.now(tz)
+    now_utc = datetime.now(timezone.utc)
+    # Same floor rule as create validation — keep list/status aligned.
+    if now_user.date() <= now_utc.date():
+        local = now_user
+    else:
+        local = now_utc
+    today_str = local.date().isoformat()
+    now_hm = f"{local.hour:02d}:{local.minute:02d}"
+    return today_str, now_hm
+
+
+async def _user_today_str(uid: str, db: AsyncIOMotorDatabase) -> str:
+    """Return effective 'today' for list/status."""
+    today_str, _ = await _user_local_clock(uid, db)
+    return today_str
 
 
 # ---------------------------------------------------------------------------
@@ -126,31 +146,34 @@ async def list_reminders(
     Pagination: pass limit + cursor (last item id) for the next page.
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
-    today_str = await _user_today_str(current_user["uid"], db)
-    query = build_reminder_tab_query(pet_id, tab, today_str)
+    today_str, now_hm = await _user_local_clock(current_user["uid"], db)
+    query = build_reminder_tab_query(pet_id, tab, today_str, now_hm=now_hm)
     sort_dir = 1 if tab in ("today", "upcoming") else -1
-    sort = [("date", sort_dir), ("_id", sort_dir)]
+    sort = [("date", sort_dir), ("time", sort_dir), ("_id", sort_dir)]
 
     if cursor and is_valid_object_id(cursor):
         last = await db.reminders.find_one({"_id": ObjectId(cursor)})
         if last:
             last_date = last.get("date")
+            last_time = last.get("time") or ""
             last_id = ObjectId(cursor)
             if sort_dir == 1:
                 query["$or"] = [
                     {"date": {"$gt": last_date}},
-                    {"date": last_date, "_id": {"$gt": last_id}},
+                    {"date": last_date, "time": {"$gt": last_time}},
+                    {"date": last_date, "time": last_time, "_id": {"$gt": last_id}},
                 ]
             else:
                 query["$or"] = [
                     {"date": {"$lt": last_date}},
-                    {"date": last_date, "_id": {"$lt": last_id}},
+                    {"date": last_date, "time": {"$lt": last_time}},
+                    {"date": last_date, "time": last_time, "_id": {"$lt": last_id}},
                 ]
 
     docs = await db.reminders.find(query, sort=sort).to_list(limit or None)
     if limit:
         docs = docs[:limit]
-    return [_enrich(d, today_str) for d in docs]
+    return [_enrich(d, today_str, now_hm=now_hm) for d in docs]
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +210,8 @@ async def create_reminder(
     }
     result = await db.reminders.insert_one(doc)
     doc["_id"] = result.inserted_id
-    return _enrich(doc, await _user_today_str(uid, db))
+    today_str, now_hm = await _user_local_clock(uid, db)
+    return _enrich(doc, today_str, now_hm=now_hm)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +227,8 @@ async def get_reminder(
 ):
     await validate_pet_ownership(pet_id, current_user["uid"], db)
     doc = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
-    return _enrich(doc, await _user_today_str(current_user["uid"], db))
+    today_str, now_hm = await _user_local_clock(current_user["uid"], db)
+    return _enrich(doc, today_str, now_hm=now_hm)
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +269,8 @@ async def update_reminder(
         {"_id": ObjectId(reminder_id)}, {"$set": updates}
     )
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
-    return _enrich(updated, await _user_today_str(current_user["uid"], db))
+    today_str, now_hm = await _user_local_clock(current_user["uid"], db)
+    return _enrich(updated, today_str, now_hm=now_hm)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +330,8 @@ async def update_reminder_status(
         )
 
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
-    return _enrich(updated, await _user_today_str(uid, db))
+    today_str, now_hm = await _user_local_clock(uid, db)
+    return _enrich(updated, today_str, now_hm=now_hm)
 
 # ---------------------------------------------------------------------------
 # Delete reminder

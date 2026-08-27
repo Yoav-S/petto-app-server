@@ -71,7 +71,7 @@ class TestReminderStatusComputation:
 
     def test_today_date_returns_today(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
-        reminder = create_reminder(client, mock_db, pet["id"], today())
+        reminder = create_reminder(client, mock_db, pet["id"], today(), time="23:59")
         assert reminder["status"] == "today"
 
     def test_past_date_without_action_returns_missed(self, client, mock_db):
@@ -82,7 +82,7 @@ class TestReminderStatusComputation:
 
     def test_patch_completed_returns_completed(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
-        reminder = create_reminder(client, mock_db, pet["id"], today())
+        reminder = create_reminder(client, mock_db, pet["id"], today(), time="23:59")
         r = client.patch(
             f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
             json={"status": "completed"},
@@ -93,7 +93,7 @@ class TestReminderStatusComputation:
 
     def test_patch_missed_returns_missed(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
-        reminder = create_reminder(client, mock_db, pet["id"], today())
+        reminder = create_reminder(client, mock_db, pet["id"], today(), time="23:59")
         r = client.patch(
             f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
             json={"status": "missed"},
@@ -119,7 +119,8 @@ class TestReminderTabFiltering:
 
     def test_today_tab_returns_only_todays_scheduled(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
-        create_reminder(client, mock_db, pet["id"], today(), time="09:00")
+        # Late time so the row stays on Today regardless of wall clock.
+        create_reminder(client, mock_db, pet["id"], today(), time="23:59")
         create_reminder(client, mock_db, pet["id"], future(), time="10:00")
         create_reminder(client, mock_db, pet["id"], past(), time="11:00")
 
@@ -132,7 +133,7 @@ class TestReminderTabFiltering:
 
     def test_upcoming_tab_returns_only_future_scheduled(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
-        create_reminder(client, mock_db, pet["id"], today(), time="09:00")
+        create_reminder(client, mock_db, pet["id"], today(), time="23:59")
         create_reminder(client, mock_db, pet["id"], future(10), time="10:00")
         create_reminder(client, mock_db, pet["id"], future(20), time="11:00")
 
@@ -146,7 +147,7 @@ class TestReminderTabFiltering:
 
     def test_recent_tab_returns_completed_and_missed(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
-        r1 = create_reminder(client, mock_db, pet["id"], today(), time="09:00")
+        r1 = create_reminder(client, mock_db, pet["id"], today(), time="23:59")
         create_reminder(client, mock_db, pet["id"], past(3), time="10:00")  # auto-missed
 
         # Explicitly mark r1 as completed
@@ -163,10 +164,26 @@ class TestReminderTabFiltering:
         assert "completed" in statuses
         assert "missed" in statuses
 
+    def test_today_past_time_moves_to_recent(self, client, mock_db):
+        """Same-day reminder whose clock time already passed → Recent as missed."""
+        pet = make_pet(client, HEADERS_A)
+        create_reminder(client, mock_db, pet["id"], today(), time="00:00")
+
+        today_items = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=today", headers=HEADERS_A
+        ).json()
+        assert today_items == []
+
+        recent_items = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
+        ).json()
+        assert len(recent_items) == 1
+        assert recent_items[0]["status"] == "missed"
+
     def test_today_tab_excludes_completed_reminders(self, client, mock_db):
         """A completed reminder for today must NOT appear in today tab."""
         pet = make_pet(client, HEADERS_A)
-        r1 = create_reminder(client, mock_db, pet["id"], today())
+        r1 = create_reminder(client, mock_db, pet["id"], today(), time="23:59")
         client.patch(
             f"/api/v1/pets/{pet['id']}/reminders/{r1['id']}/status",
             json={"status": "completed"},

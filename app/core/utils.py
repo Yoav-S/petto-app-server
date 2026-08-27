@@ -118,7 +118,12 @@ def compute_vaccination_status(next_date_str: Optional[str]) -> str:
 
 
 def compute_reminder_status(
-    reminder_date_str: str, stored_status: str, today_str: Optional[str] = None
+    reminder_date_str: str,
+    stored_status: str,
+    today_str: Optional[str] = None,
+    *,
+    reminder_time_str: Optional[str] = None,
+    now_hm: Optional[str] = None,
 ) -> str:
     """
     Compute the reminder status to return in API responses.
@@ -132,9 +137,14 @@ def compute_reminder_status(
     today_str is the caller's "today" ("YYYY-MM-DD") — pass the user's local
     date so day boundaries match their timezone. Falls back to the server date.
 
+    When reminder_time_str + now_hm are provided, a same-day scheduled
+    reminder whose clock time has already passed is treated as missed
+    (moves from Today → Recent).
+
     Logic:
       - completed / missed → always return stored value (user explicitly set these)
-      - scheduled + date < today → auto "missed" (date passed without action)
+      - scheduled + date < today → auto "missed"
+      - scheduled + date == today + time passed → auto "missed"
       - scheduled + date == today → "today"
       - scheduled + date > today → "scheduled"
     """
@@ -145,36 +155,57 @@ def compute_reminder_status(
     if reminder_date_str < today_str:
         return "missed"
     if reminder_date_str == today_str:
+        if (
+            reminder_time_str
+            and now_hm
+            and reminder_time_str[:5] < now_hm[:5]
+        ):
+            return "missed"
         return "today"
     return "scheduled"
 
 
-def build_reminder_tab_query(pet_id: str, tab: str, today_str: Optional[str] = None) -> dict:
+def build_reminder_tab_query(
+    pet_id: str,
+    tab: str,
+    today_str: Optional[str] = None,
+    *,
+    now_hm: Optional[str] = None,
+) -> dict:
     """
     Build a MongoDB filter dict for the reminders tab endpoint.
 
-    today    → date == today, stored_status == "scheduled"
-    upcoming → date >  today, stored_status == "scheduled"
-    recent   → stored_status in [completed, missed]
-               OR (date < today AND status == "scheduled")  ← auto-missed
+    today    → date == today, stored scheduled, time still upcoming (if now_hm)
+    upcoming → date >  today, stored scheduled
+    recent   → completed | missed
+               OR past calendar day still scheduled
+               OR today + scheduled + time already passed
 
-    today_str should be the user's local date; falls back to the server date.
+    today_str / now_hm should be the user's local date/time.
     """
     if today_str is None:
         today_str = date.today().isoformat()
     base = {"pet_id": pet_id}
+    hm = (now_hm or "")[:5]
 
     if tab == "today":
-        return {**base, "date": today_str, "status": "scheduled"}
+        query: dict = {**base, "date": today_str, "status": "scheduled"}
+        if hm:
+            query["time"] = {"$gte": hm}
+        return query
 
     if tab == "upcoming":
         return {**base, "date": {"$gt": today_str}, "status": "scheduled"}
 
     # tab == "recent"
+    overdue_today: dict = {"date": today_str, "status": "scheduled"}
+    if hm:
+        overdue_today["time"] = {"$lt": hm}
     return {
         **base,
         "$or": [
             {"status": {"$in": ["completed", "missed"]}},
             {"date": {"$lt": today_str}, "status": "scheduled"},
+            overdue_today,
         ],
     }
