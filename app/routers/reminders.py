@@ -64,17 +64,23 @@ async def _assert_future_datetime(
     Today is always allowed (any clock time). Past calendar days are not.
     Keeping an already-stored today/past date (title edits, status flows) is
     allowed; moving onto a past date is not.
+
+    Uses the earlier of (user-tz today, UTC today) so a device/timezone skew
+    around midnight cannot block creating a same-day reminder.
     """
     user = await db.users.find_one({"firebase_uid": uid})
     tz_name = (user or {}).get("timezone")
     tz = resolve_timezone(tz_name)
-    today_str = datetime.now(tz).date().isoformat()
-    date_is_new = previous_date is None or date != previous_date
-    if date_is_new and date < today_str:
+    date_norm = (date or "")[:10]
+    today_user = datetime.now(tz).date()
+    today_utc = datetime.now(timezone.utc).date()
+    min_today = min(today_user, today_utc).isoformat()
+    date_is_new = previous_date is None or date_norm != (previous_date or "")[:10]
+    if date_is_new and date_norm < min_today:
         raise_api_error(422, ErrorCode.REMINDER_DATETIME_IN_PAST)
 
-    if not compute_scheduled_at(date, time, tz_name):
-        raise_api_error(422, ErrorCode.REMINDER_DATETIME_IN_PAST)
+    if not compute_scheduled_at(date_norm, time, tz_name):
+        raise_api_error(422, ErrorCode.FAILED_TO_SAVE)
 
 
 def _enrich(doc: dict, today_str: str | None = None) -> ReminderOut:
