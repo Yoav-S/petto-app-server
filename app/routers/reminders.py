@@ -95,10 +95,16 @@ def _enrich(doc: dict, today_str: str | None = None) -> ReminderOut:
 
 
 async def _user_today_str(uid: str, db: AsyncIOMotorDatabase) -> str:
-    """Return the user's current local date ('YYYY-MM-DD') from their stored timezone."""
+    """Return effective 'today' for list/status (earlier of user-tz and UTC).
+
+    Matches `_assert_future_datetime` so a same-day reminder the client just
+    created always lands on the Today tab even with mild timezone skew.
+    """
     user = await db.users.find_one({"firebase_uid": uid})
     tz = resolve_timezone((user or {}).get("timezone"))
-    return datetime.now(tz).date().isoformat()
+    today_user = datetime.now(tz).date()
+    today_utc = datetime.now(timezone.utc).date()
+    return min(today_user, today_utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
