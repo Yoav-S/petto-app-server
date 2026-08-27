@@ -19,22 +19,32 @@ Create/update API rejects past dates (today is always allowed).
 future reminder, then backdate the stored date.
 the document in the DB.
 """
+from unittest.mock import patch
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import pytest
 from datetime import date, timedelta
 from bson import ObjectId
-from tests.conftest import HEADERS_A, make_pet
+from tests.conftest import HEADERS_A, USER_A_UID, make_pet
+from app.core.scheduling import resolve_timezone
+
+
+def effective_today(tz_name: str | None = None) -> str:
+    """Match server tab/status day boundaries (user tz or DEFAULT_TIMEZONE)."""
+    tz = resolve_timezone(tz_name)
+    return datetime.now(tz).date().isoformat()
 
 
 def today() -> str:
-    return date.today().isoformat()
+    return effective_today()
 
 
 def future(days: int = 30) -> str:
-    return (date.today() + timedelta(days=days)).isoformat()
+    return (date.fromisoformat(today()) + timedelta(days=days)).isoformat()
 
 
 def past(days: int = 1) -> str:
-    return (date.today() - timedelta(days=days)).isoformat()
+    return (date.fromisoformat(today()) - timedelta(days=days)).isoformat()
 
 
 def create_reminder(client, mock_db, pet_id: str, reminder_date: str, **kwargs) -> dict:
@@ -201,3 +211,46 @@ class TestReminderTabFiltering:
         )
         assert r.status_code == 200
         assert r.json() == []
+
+    def test_today_create_appears_on_today_tab_when_user_ahead_of_utc(
+        self, client, mock_db
+    ):
+        """User local date ahead of UTC: today's reminder must not land in Upcoming."""
+        pet = make_pet(client, HEADERS_A)
+        mock_db.users._col.insert_one(
+            {"firebase_uid": USER_A_UID, "timezone": "Asia/Jerusalem"}
+        )
+        user_today = "2026-08-28"
+        user_now = datetime(2026, 8, 28, 10, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
+
+        with patch("app.routers.reminders.datetime") as mock_dt:
+            mock_dt.now.side_effect = lambda tz=None: (
+                user_now
+                if tz is not None and str(tz) == "Asia/Jerusalem"
+                else datetime(2026, 8, 27, 22, 0, tzinfo=timezone.utc)
+            )
+            create_r = client.post(
+                f"/api/v1/pets/{pet['id']}/reminders",
+                json={
+                    "title": "Morning walk",
+                    "date": user_today,
+                    "time": "18:00",
+                    "repeat": "off",
+                },
+                headers=HEADERS_A,
+            )
+            assert create_r.status_code == 201, create_r.text
+            assert create_r.json()["status"] == "today"
+
+            today_items = client.get(
+                f"/api/v1/pets/{pet['id']}/reminders?tab=today",
+                headers=HEADERS_A,
+            ).json()
+            upcoming_items = client.get(
+                f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming",
+                headers=HEADERS_A,
+            ).json()
+
+        assert len(today_items) == 1
+        assert today_items[0]["date"] == user_today
+        assert upcoming_items == []

@@ -104,19 +104,17 @@ def _enrich(
 async def _user_local_clock(
     uid: str, db: AsyncIOMotorDatabase
 ) -> tuple[str, str]:
-    """Return (today YYYY-MM-DD, now HH:MM) in the user's timezone floor vs UTC."""
+    """Return (today YYYY-MM-DD, now HH:MM) in the user's timezone.
+
+    Tab filtering and display status use the user's calendar day so a
+    reminder created for "today" on the phone lands on the Today tab.
+    Create validation still uses min(user_today, utc_today) only to reject
+    past calendar days — see _assert_future_datetime.
+    """
     user = await db.users.find_one({"firebase_uid": uid})
     tz = resolve_timezone((user or {}).get("timezone"))
-    now_user = datetime.now(tz)
-    now_utc = datetime.now(timezone.utc)
-    # Same floor rule as create validation — keep list/status aligned.
-    if now_user.date() <= now_utc.date():
-        local = now_user
-    else:
-        local = now_utc
-    today_str = local.date().isoformat()
-    now_hm = f"{local.hour:02d}:{local.minute:02d}"
-    return today_str, now_hm
+    now = datetime.now(tz)
+    return now.date().isoformat(), f"{now.hour:02d}:{now.minute:02d}"
 
 
 async def _user_today_str(uid: str, db: AsyncIOMotorDatabase) -> str:
