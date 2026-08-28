@@ -53,7 +53,7 @@ def _ms_to_dt(ms: Optional[int]) -> Optional[datetime]:
 
 
 def _has_premium_entitlement(entitlement_ids: list[str]) -> bool:
-    return ENTITLEMENT_ID in entitlement_ids or not entitlement_ids
+    return ENTITLEMENT_ID in entitlement_ids
 
 
 async def _find_user_by_app_user_id(db: AsyncIOMotorDatabase, app_user_id: str):
