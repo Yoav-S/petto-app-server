@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.core.database import get_database
 from app.core.push import is_dead_token_ticket, send_expo_push
 from app.core.scheduling import compute_scheduled_at, catch_up_recurring_date
+from app.core.subscription import is_pet_locked_for_owner
 from app.core.utils import is_valid_object_id
 from app.middleware.auth import get_current_user
 from app.models.notification import (
@@ -236,6 +237,8 @@ async def dispatch_reminders(
     tz_cache: dict[str, str | None] = {}
     token_cache: dict[str, list[str]] = {}
     prefs_cache: dict[str, NotificationPrefs] = {}
+    user_cache: dict[str, dict | None] = {}
+    locked_cache: dict[str, bool] = {}
 
     async def get_pet(pet_id: str) -> dict | None:
         if pet_id not in pet_cache:
@@ -261,8 +264,20 @@ async def dispatch_reminders(
     async def get_prefs(uid: str) -> NotificationPrefs:
         if uid not in prefs_cache:
             user = await db.users.find_one({"firebase_uid": uid})
+            user_cache[uid] = user
             prefs_cache[uid] = _merge_notification_prefs((user or {}).get("notification_prefs"))
         return prefs_cache[uid]
+
+    async def pet_is_locked(pet: dict) -> bool:
+        pet_id = str(pet["_id"])
+        if pet_id in locked_cache:
+            return locked_cache[pet_id]
+        uid = pet.get("user_id")
+        if uid not in user_cache:
+            user_cache[uid] = await db.users.find_one({"firebase_uid": uid})
+        locked = await is_pet_locked_for_owner(pet, db, user_doc=user_cache[uid])
+        locked_cache[pet_id] = locked
+        return locked
 
     items: list[dict] = []
     due_count = 0
@@ -271,6 +286,8 @@ async def dispatch_reminders(
     for reminder in candidates:
         pet = await get_pet(reminder.get("pet_id", ""))
         if not pet:
+            continue
+        if await pet_is_locked(pet):
             continue
         uid = pet.get("user_id")
         tz_name = await get_tz(uid)

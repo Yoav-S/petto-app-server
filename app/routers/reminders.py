@@ -27,11 +27,7 @@ from app.core.scheduling import (
     next_occurrence,
     catch_up_recurring_date,
 )
-from app.core.subscription import (
-    FREE_MAX_ACTIVE_REMINDERS,
-    count_active_reminders,
-    user_has_premium,
-)
+from app.core.subscription import can_add_active_reminder
 from app.core.utils import (
     doc_to_dict,
     is_valid_object_id,
@@ -190,11 +186,9 @@ async def create_reminder(
     await validate_pet_ownership(pet_id, uid, db)
 
     user = await db.users.find_one({"firebase_uid": uid})
-    if not user_has_premium(user):
-        today_str = await _user_today_str(uid, db)
-        active = await count_active_reminders(uid, db, today_str)
-        if active >= FREE_MAX_ACTIVE_REMINDERS:
-            raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_REMINDER)
+    today_str = await _user_today_str(uid, db)
+    if not await can_add_active_reminder(uid, db, today_str, user_doc=user):
+        raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_REMINDER)
 
     # Today (any time) and future dates are allowed. Only reject calendar days
     # before the user's today — never block same-day creates.

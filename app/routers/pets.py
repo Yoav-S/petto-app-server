@@ -14,7 +14,12 @@ from datetime import datetime, timezone
 
 from app.core.database import get_database
 from app.core.errors import ErrorCode, raise_api_error
-from app.core.subscription import FREE_MAX_PETS, count_user_pets, user_has_premium
+from app.core.subscription import (
+    FREE_MAX_PETS,
+    count_user_pets,
+    get_included_pet_id,
+    user_has_premium,
+)
 from app.core.utils import doc_to_dict, validate_pet_ownership
 from app.middleware.auth import get_current_user
 from app.models.pet import PetCreate, PetUpdate, PetOut
@@ -31,9 +36,21 @@ async def list_pets(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Return all pets belonging to the authenticated user."""
-    docs = await db.pets.find({"user_id": current_user["uid"]}).to_list(None)
-    return [PetOut(**doc_to_dict(d)) for d in docs]
+    """Return all pets belonging to the authenticated user, oldest first."""
+    uid = current_user["uid"]
+    docs = (
+        await db.pets.find({"user_id": uid})
+        .sort([("created_at", 1), ("_id", 1)])
+        .to_list(None)
+    )
+    user = await db.users.find_one({"firebase_uid": uid})
+    included_id = None if user_has_premium(user) else await get_included_pet_id(uid, db)
+    out: list[PetOut] = []
+    for d in docs:
+        payload = doc_to_dict(d)
+        payload["locked"] = bool(included_id) and payload["id"] != included_id
+        out.append(PetOut(**payload))
+    return out
 
 
 # ---------------------------------------------------------------------------

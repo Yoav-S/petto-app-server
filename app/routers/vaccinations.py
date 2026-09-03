@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from app.core.database import get_database
 from app.core.scheduling import resolve_timezone
+from app.core.subscription import can_add_active_reminder
 from app.core.utils import (
     doc_to_dict,
     validate_pet_ownership,
@@ -118,8 +119,12 @@ async def create_vaccination(
     result = await db.vaccinations.insert_one(doc)
     doc["_id"] = result.inserted_id
 
-    # Auto-create reminder when next_date is set (server-rules §3.2)
-    if body.next_date:
+    # Auto-create reminder when next_date is set (server-rules §3.2).
+    # Skip if the free-plan reminder cap is already reached — the vaccine
+    # record still saves.
+    if body.next_date and await can_add_active_reminder(
+        current_user["uid"], db, today_str
+    ):
         reminder_doc = {
             "pet_id": pet_id,
             "title": f"{body.name} vaccine due",

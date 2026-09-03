@@ -10,7 +10,7 @@ from typing import Any, Optional
 from bson import ObjectId
 from fastapi import HTTPException
 
-from app.core.errors import ErrorCode
+from app.core.errors import ErrorCode, raise_api_error
 
 _NOT_FOUND = {"code": ErrorCode.NOT_FOUND.value}
 
@@ -55,18 +55,32 @@ def is_valid_object_id(value: str) -> bool:
 # Ownership validation
 # ---------------------------------------------------------------------------
 
-async def validate_pet_ownership(pet_id: str, uid: str, db) -> dict:
+async def validate_pet_ownership(
+    pet_id: str,
+    uid: str,
+    db,
+    *,
+    require_plan_access: bool = True,
+) -> dict:
     """
     Confirm that pet_id exists and belongs to uid.
     Returns the raw pet document.
     Raises HTTP 404 (not 403) — we never reveal whether a resource exists
     to an unauthorized caller.
+
+    Free-plan extras (2nd+ pets after a downgrade) raise 403 so the client
+    can prompt an upgrade instead of loading locked pet data.
     """
     if not is_valid_object_id(pet_id):
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
     pet = await db.pets.find_one({"_id": ObjectId(pet_id)})
     if not pet or pet.get("user_id") != uid:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    if require_plan_access:
+        from app.core.subscription import is_pet_locked_for_owner
+
+        if await is_pet_locked_for_owner(pet, db):
+            raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_PET_ACCESS)
     return pet
 
 

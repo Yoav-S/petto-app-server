@@ -59,3 +59,4 @@ class PetOut(BaseModel):
     is_neutered: Optional[bool]
     notes: Optional[str]
     created_at: datetime
+    locked: bool = False

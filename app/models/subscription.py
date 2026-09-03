@@ -19,6 +19,14 @@ class SubscriptionOut(BaseModel):
     updated_at: Optional[datetime] = None
 
 
+class SubscriptionSyncIn(BaseModel):
+    """Client-observed store flags. Never grants premium — only mirrors renewal."""
+
+    will_renew: bool
+    expires_at: Optional[datetime] = None
+    product_id: Optional[str] = None
+
+
 class RevenueCatEvent(BaseModel):
     """Subset of RevenueCat webhook event fields we care about."""
 

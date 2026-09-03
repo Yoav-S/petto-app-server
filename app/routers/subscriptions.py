@@ -2,6 +2,7 @@
 subscriptions.py — RevenueCat webhook + plan mirroring.
 
 POST /subscriptions/webhook  — public (Bearer secret), updates user.subscription
+POST /subscriptions/sync     — authenticated, mirrors store auto-renew into Mongo
 """
 import logging
 from datetime import datetime, timezone
@@ -14,7 +15,8 @@ from app.core.config import settings
 from app.core.database import get_database
 from app.core.errors import ErrorCode, raise_api_error
 from app.core.subscription import DEFAULT_SUBSCRIPTION, normalize_subscription
-from app.models.subscription import RevenueCatWebhook
+from app.models.subscription import RevenueCatWebhook, SubscriptionSyncIn
+from app.middleware.auth import get_current_user
 
 logger = logging.getLogger("petto")
 
@@ -38,8 +40,10 @@ REVOKE_EVENTS = {
 }
 
 # Still entitled until expires_at — only flip will_renew.
+# BILLING_ISSUE is not a cancel: the store retries payment and will_renew stays true.
 SOFT_CANCEL_EVENTS = {
     "CANCELLATION",
+    "SUBSCRIPTION_PAUSED",
 }
 
 
@@ -68,6 +72,39 @@ async def _set_subscription(db: AsyncIOMotorDatabase, uid: str, patch: dict[str,
         {"firebase_uid": uid},
         {"$set": {"subscription": sub, "updated_at": datetime.now(timezone.utc)}},
     )
+
+
+@router.post("/sync", status_code=200)
+async def sync_subscription_from_store(
+    body: SubscriptionSyncIn,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """
+    Mirror auto-renew from the device store after manage-subscriptions.
+    Never grants or revokes premium — plan still changes only via RevenueCat webhooks.
+    """
+    uid = current_user["uid"]
+    user = await db.users.find_one({"firebase_uid": uid})
+    if not user:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+
+    existing = normalize_subscription(user.get("subscription"))
+    if existing.get("plan") != "premium":
+        return {"ok": True, "ignored": True}
+
+    patch = {
+        **existing,
+        "will_renew": body.will_renew,
+        "provider": existing.get("provider") or "revenuecat",
+    }
+    if body.expires_at is not None:
+        patch["expires_at"] = body.expires_at
+    if body.product_id:
+        patch["product_id"] = body.product_id
+
+    await _set_subscription(db, uid, patch)
+    return {"ok": True}
 
 
 @router.post("/webhook", status_code=200)
