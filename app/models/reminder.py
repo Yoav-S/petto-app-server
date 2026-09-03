@@ -34,12 +34,25 @@ ReminderCategory = Literal[
     "observation",
 ]
 
+ReminderAlert = Literal[
+    "off",
+    "5m",
+    "10m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "1d",
+]
+
 
 class ReminderCreate(BaseModel):
     title: str = Field(..., max_length=300)
-    date: str                                     # "YYYY-MM-DD"
+    date: str                                     # start date "YYYY-MM-DD"
     time: str = Field(..., pattern=r"^\d{2}:\d{2}$")  # "HH:MM"
     repeat: ReminderRepeat = "off"
+    end_date: Optional[str] = None                # optional end "YYYY-MM-DD"
+    alert: ReminderAlert = "off"
     note: Optional[str] = Field(None, max_length=300)
     category: ReminderCategory = "general"
 
@@ -49,6 +62,8 @@ class ReminderUpdate(BaseModel):
     date: Optional[str] = None
     time: Optional[str] = Field(None, pattern=r"^\d{2}:\d{2}$")
     repeat: Optional[ReminderRepeat] = None
+    end_date: Optional[str] = None
+    alert: Optional[ReminderAlert] = None
     note: Optional[str] = Field(None, max_length=300)
     category: Optional[ReminderCategory] = None
 
@@ -68,6 +83,8 @@ class ReminderOut(BaseModel):
     date: str
     time: str
     repeat: str
+    end_date: Optional[str] = None
+    alert: str = "off"
     note: Optional[str]
     category: str = "general"
     # Server-computed display status: "today" | "scheduled" | "missed" | "completed"
@@ -77,3 +94,4 @@ class ReminderOut(BaseModel):
     # Cleared when the user marks Done/Missed (and when a recurring reminder
     # rolls forward to its next occurrence).
     notified_at: Optional[datetime] = None
+    alert_notified_at: Optional[datetime] = None

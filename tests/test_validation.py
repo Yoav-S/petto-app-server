@@ -142,6 +142,54 @@ class TestReminderValidation:
         )
         assert r.status_code == 201
 
+    def test_end_date_not_after_start_rejected(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={
+                "title": "Walk",
+                "date": "2099-06-10",
+                "time": "09:00",
+                "end_date": "2099-06-10",
+            },
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 422
+        assert r.json()["detail"]["code"] == "end_date_before_start"
+
+    def test_end_date_and_alert_accepted(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={
+                "title": "Walk",
+                "date": "2099-06-10",
+                "time": "09:00",
+                "repeat": "every_day",
+                "end_date": "2099-06-20",
+                "alert": "15m",
+            },
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["end_date"] == "2099-06-20"
+        assert body["alert"] == "15m"
+
+    def test_invalid_alert_rejected(self, client):
+        pet = make_pet(client, HEADERS_A)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={
+                "title": "Walk",
+                "date": "2099-06-10",
+                "time": "09:00",
+                "alert": "3m",
+            },
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 422
+
 
 class TestVaccinationValidation:
     """Vaccination requires name and date."""

@@ -131,9 +131,12 @@ async def create_vaccination(
             "date": body.next_date,
             "time": "09:00",          # default time (server-rules §4)
             "repeat": "off",
+            "end_date": None,
+            "alert": "off",
             "status": "scheduled",
             "note": None,
             "notified_at": None,      # set once a push has been sent (dispatcher)
+            "alert_notified_at": None,
             "created_at": datetime.now(timezone.utc),
         }
         await db.reminders.insert_one(reminder_doc)

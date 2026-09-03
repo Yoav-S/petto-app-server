@@ -112,6 +112,41 @@ class TestReminderStatusComputation:
         assert r.status_code == 200
         assert r.json()["status"] == "missed"
 
+    def test_recurring_stops_when_next_occurrence_after_end(self, client, mock_db):
+        pet = make_pet(client, HEADERS_A)
+        start = future(1)
+        end = future(2)
+        created = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={
+                "title": "Test",
+                "date": start,
+                "time": "09:00",
+                "repeat": "every_day",
+                "end_date": end,
+            },
+            headers=HEADERS_A,
+        )
+        assert created.status_code == 201, created.text
+        reminder = created.json()
+
+        first = client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
+            json={"status": "completed"},
+            headers=HEADERS_A,
+        )
+        assert first.status_code == 200
+        assert first.json()["date"] == end
+        assert first.json()["status"] == "scheduled"
+
+        second = client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
+            json={"status": "completed"},
+            headers=HEADERS_A,
+        )
+        assert second.status_code == 200
+        assert second.json()["status"] == "completed"
+
     def test_invalid_status_value_rejected(self, client, mock_db):
         """Status must be 'completed' or 'missed' — anything else is 422."""
         pet = make_pet(client, HEADERS_A)

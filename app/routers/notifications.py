@@ -25,7 +25,12 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.config import settings
 from app.core.database import get_database
 from app.core.push import is_dead_token_ticket, send_expo_push
-from app.core.scheduling import compute_scheduled_at, catch_up_recurring_date
+from app.core.scheduling import (
+    compute_scheduled_at,
+    catch_up_recurring_date,
+    compute_alert_at,
+    occurrence_within_end,
+)
 from app.core.subscription import is_pet_locked_for_owner
 from app.core.utils import is_valid_object_id
 from app.middleware.auth import get_current_user
@@ -214,11 +219,12 @@ async def dispatch_reminders(
             reminder.get("repeat") or "off",
             tz_name,
             after=now,
+            end_date=reminder.get("end_date"),
         )
         if caught_up and caught_up != reminder.get("date"):
             await db.reminders.update_one(
                 {"_id": reminder["_id"]},
-                {"$set": {"date": caught_up, "notified_at": None}},
+                {"$set": {"date": caught_up, "notified_at": None, "alert_notified_at": None}},
             )
             logger.info(
                 "caught up stuck recurring reminder %s -> %s",
@@ -229,7 +235,17 @@ async def dispatch_reminders(
     candidates = await db.reminders.find(
         {
             "status": "scheduled",
-            "$or": [{"notified_at": None}, {"notified_at": {"$exists": False}}],
+            "$or": [
+                {"notified_at": None},
+                {"notified_at": {"$exists": False}},
+                {
+                    "alert": {"$nin": [None, "", "off"]},
+                    "$or": [
+                        {"alert_notified_at": None},
+                        {"alert_notified_at": {"$exists": False}},
+                    ],
+                },
+            ],
         }
     ).to_list(None)
 
@@ -295,31 +311,110 @@ async def dispatch_reminders(
         time_str = reminder.get("time", "")
         repeat = reminder.get("repeat") or "off"
 
+        end_date = reminder.get("end_date")
+        if not occurrence_within_end(date_str, end_date):
+            await db.reminders.update_one(
+                {"_id": reminder["_id"]},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "notified_at": None,
+                        "alert_notified_at": None,
+                    }
+                },
+            )
+            continue
+
         # Recurring series that sat overdue for days: jump to the next future
         # slot instead of re-firing for every skipped day on each login.
         if repeat != "off":
             caught_up = catch_up_recurring_date(
-                date_str, time_str, repeat, tz_name, after=now
+                date_str,
+                time_str,
+                repeat,
+                tz_name,
+                after=now,
+                end_date=end_date,
             )
             if caught_up and caught_up != date_str:
                 await db.reminders.update_one(
                     {"_id": reminder["_id"]},
-                    {"$set": {"date": caught_up, "notified_at": None}},
+                    {
+                        "$set": {
+                            "date": caught_up,
+                            "notified_at": None,
+                            "alert_notified_at": None,
+                        }
+                    },
                 )
                 date_str = caught_up
                 reminder["date"] = caught_up
                 reminder["notified_at"] = None
+                reminder["alert_notified_at"] = None
+            elif caught_up is None and not occurrence_within_end(date_str, end_date):
+                await db.reminders.update_one(
+                    {"_id": reminder["_id"]},
+                    {
+                        "$set": {
+                            "status": "completed",
+                            "notified_at": None,
+                            "alert_notified_at": None,
+                        }
+                    },
+                )
+                continue
 
         scheduled_at = compute_scheduled_at(date_str, time_str, tz_name)
-        if not scheduled_at or scheduled_at > now:
+        tokens = await get_tokens(uid)
+        prefs = await get_prefs(uid)
+        reminders_enabled = prefs.all and prefs.reminders
+        reminder_id = str(reminder["_id"])
+
+        alert = reminder.get("alert") or "off"
+        alert_pending = alert != "off" and not reminder.get("alert_notified_at")
+        alert_at = (
+            compute_alert_at(date_str, time_str, tz_name, alert) if alert_pending else None
+        )
+        alert_due = bool(alert_at and alert_at <= now)
+        main_due = bool(scheduled_at and scheduled_at <= now and not reminder.get("notified_at"))
+
+        if alert_due and not dry_run and reminders_enabled and tokens:
+            alert_messages = [
+                {
+                    "to": token,
+                    "title": "Reminder",
+                    "body": reminder.get("title") or "Reminder",
+                    "sound": "default",
+                    "channelId": "default",
+                    "priority": "high",
+                    "data": {
+                        "type": "reminder",
+                        "reminderId": reminder_id,
+                        "petId": reminder.get("pet_id"),
+                    },
+                }
+                for token in tokens
+            ]
+            try:
+                await send_expo_push(alert_messages)
+            except Exception:
+                logger.exception("reminder %s alert Expo send failed", reminder_id)
+            await db.reminders.update_one(
+                {"_id": reminder["_id"]},
+                {"$set": {"alert_notified_at": now}},
+            )
+            reminder["alert_notified_at"] = now
+        elif alert_due and not dry_run:
+            await db.reminders.update_one(
+                {"_id": reminder["_id"]},
+                {"$set": {"alert_notified_at": now}},
+            )
+            reminder["alert_notified_at"] = now
+
+        if not main_due:
             continue
 
         due_count += 1
-        tokens = await get_tokens(uid)
-        prefs = await get_prefs(uid)
-        # Master switch + the "Reminders" category both gate reminder pushes.
-        reminders_enabled = prefs.all and prefs.reminders
-        reminder_id = str(reminder["_id"])
         item = {
             "reminder_id": reminder_id,
             "pet_id": reminder.get("pet_id"),

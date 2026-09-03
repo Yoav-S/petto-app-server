@@ -26,6 +26,7 @@ from app.core.scheduling import (
     compute_scheduled_at,
     next_occurrence,
     catch_up_recurring_date,
+    occurrence_within_end,
 )
 from app.core.subscription import can_add_active_reminder
 from app.core.utils import (
@@ -77,6 +78,17 @@ async def _assert_future_datetime(
         raise_api_error(422, ErrorCode.FAILED_TO_SAVE)
 
 
+def _normalize_end_date(end_date: str | None) -> str | None:
+    value = (end_date or "").strip()[:10]
+    return value or None
+
+
+def _assert_end_after_start(start: str, end_date: str | None) -> None:
+    end = _normalize_end_date(end_date)
+    if end and end <= (start or "")[:10]:
+        raise_api_error(422, ErrorCode.END_DATE_BEFORE_START)
+
+
 def _enrich(
     doc: dict,
     today_str: str | None = None,
@@ -94,6 +106,10 @@ def _enrich(
     )
     if not d.get("category"):
         d["category"] = "general"
+    if not d.get("alert"):
+        d["alert"] = "off"
+    if d.get("end_date") == "":
+        d["end_date"] = None
     return ReminderOut(**d)
 
 
@@ -193,11 +209,17 @@ async def create_reminder(
     # Today (any time) and future dates are allowed. Only reject calendar days
     # before the user's today — never block same-day creates.
     await _assert_future_datetime(uid, body.date, body.time, db)
+    end_date = _normalize_end_date(body.end_date)
+    _assert_end_after_start(body.date, end_date)
     doc = {
         **body.model_dump(),
+        "date": body.date[:10],
+        "end_date": end_date,
+        "alert": body.alert or "off",
         "pet_id": pet_id,
         "status": "scheduled",       # stored status — computed on read
         "notified_at": None,         # set once a push has been sent (dispatcher)
+        "alert_notified_at": None,
         "created_at": datetime.now(timezone.utc),
     }
     result = await db.reminders.insert_one(doc)
@@ -256,6 +278,10 @@ async def update_reminder(
             db,
             previous_date=existing.get("date"),
         )
+    if "end_date" in updates:
+        updates["end_date"] = _normalize_end_date(updates.get("end_date"))
+    next_end = updates.get("end_date", existing.get("end_date"))
+    _assert_end_after_start(next_date, next_end)
 
     await db.reminders.update_one(
         {"_id": ObjectId(reminder_id)}, {"$set": updates}
@@ -294,7 +320,8 @@ async def update_reminder_status(
     now = datetime.now(timezone.utc)
 
     next_date = next_occurrence(reminder.get("date", ""), repeat)
-    if next_date:
+    end_date = reminder.get("end_date")
+    if next_date and occurrence_within_end(next_date, end_date):
         # Jump past any slots that are already overdue so Done on an old
         # daily reminder doesn't come back on the next login.
         future = catch_up_recurring_date(
@@ -303,22 +330,30 @@ async def update_reminder_status(
             repeat,
             tz_name,
             after=now,
+            end_date=end_date,
         )
         roll_to = future or next_date
-        await db.reminders.update_one(
-            {"_id": ObjectId(reminder_id)},
-            {
-                "$set": {
-                    "date": roll_to,
-                    "status": "scheduled",
-                    "notified_at": None,
-                }
-            },
-        )
+        if occurrence_within_end(roll_to, end_date):
+            await db.reminders.update_one(
+                {"_id": ObjectId(reminder_id)},
+                {
+                    "$set": {
+                        "date": roll_to,
+                        "status": "scheduled",
+                        "notified_at": None,
+                        "alert_notified_at": None,
+                    }
+                },
+            )
+        else:
+            await db.reminders.update_one(
+                {"_id": ObjectId(reminder_id)},
+                {"$set": {"status": body.status, "notified_at": None, "alert_notified_at": None}},
+            )
     else:
         await db.reminders.update_one(
             {"_id": ObjectId(reminder_id)},
-            {"$set": {"status": body.status, "notified_at": None}},
+            {"$set": {"status": body.status, "notified_at": None, "alert_notified_at": None}},
         )
 
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})

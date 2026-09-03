@@ -8,7 +8,7 @@ and convert to an absolute UTC instant.
 Kept deliberately small — no reminder schema migration required.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.relativedelta import relativedelta
@@ -25,6 +25,17 @@ _REPEAT_STEPS = {
     "every_2_weeks": relativedelta(weeks=2),
     "every_month": relativedelta(months=1),
     "every_year": relativedelta(years=1),
+}
+
+# Minutes before the reminder time. "off" sends nothing extra.
+ALERT_OFFSET_MINUTES = {
+    "5m": 5,
+    "10m": 10,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "2h": 120,
+    "1d": 1440,
 }
 
 
@@ -57,6 +68,29 @@ def compute_scheduled_at(date_str: str, time_str: str, tz_name: str | None) -> d
     return local_dt.astimezone(timezone.utc)
 
 
+def compute_alert_at(
+    date_str: str,
+    time_str: str,
+    tz_name: str | None,
+    alert: str | None,
+) -> datetime | None:
+    """UTC instant for the pre-reminder alert, or None when alert is off."""
+    minutes = ALERT_OFFSET_MINUTES.get(alert or "")
+    if minutes is None:
+        return None
+    scheduled = compute_scheduled_at(date_str, time_str, tz_name)
+    if scheduled is None:
+        return None
+    return scheduled - timedelta(minutes=minutes)
+
+
+def occurrence_within_end(date_str: str, end_date: str | None) -> bool:
+    """True when this occurrence is allowed (no end, or date <= end)."""
+    if not end_date:
+        return True
+    return date_str <= end_date
+
+
 def next_occurrence(date_str: str, repeat: str) -> str | None:
     """
     Given a reminder's current date and its repeat rule, return the next
@@ -79,25 +113,27 @@ def catch_up_recurring_date(
     tz_name: str | None,
     *,
     after: datetime,
+    end_date: str | None = None,
 ) -> str | None:
     """
     Advance a recurring series past every occurrence that is already due/overdue.
 
     Returns the first date whose scheduled_at is still in the future (after
-    `after`), or None for one-off / unknown repeat. Used so overdue daily
-    reminders don't re-notify for every skipped day.
+    `after`) and on or before end_date, or None when the series is over.
     """
     if repeat not in _REPEAT_STEPS:
         return None
     candidate = date_str
     for _ in range(800):
+        if end_date and candidate > end_date:
+            return None
         scheduled = compute_scheduled_at(candidate, time_str, tz_name)
         if scheduled is None:
             return None
         if scheduled > after:
             return candidate
         nxt = next_occurrence(candidate, repeat)
-        if not nxt:
+        if not nxt or (end_date and nxt > end_date):
             return None
         candidate = nxt
     return candidate
