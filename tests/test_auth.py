@@ -47,12 +47,15 @@ def test_send_otp_forwards_locale(client):
     assert send_otp.call_args.kwargs.get("locale") == "ru"
 
 
-def test_send_otp_creates_pending_user(client):
+def test_send_otp_leaves_no_user_row(client, mock_db):
+    """Abandoned signups must not litter the users collection."""
     with patch("app.routers.auth.send_otp_email") as send_otp:
         r = client.post("/api/v1/auth/send-otp", json={"email": "new@test.com"})
     assert r.status_code == 200, r.text
     send_otp.assert_called_once()
     assert len(send_otp.call_args[0][1]) == 6
+    assert mock_db.users._col.find_one({"email": "new@test.com"}) is None
+    assert mock_db.email_otps._col.find_one({"email": "new@test.com"}) is not None
 
 
 def test_send_otp_second_user_does_not_500(client):
@@ -83,7 +86,7 @@ def test_verify_otp_returns_custom_token(client):
     assert r.json()["custom_token"] == "custom-token-abc"
 
 
-def test_verify_otp_updates_mongo_user(client, mock_db):
+def test_verify_otp_creates_mongo_user(client, mock_db):
     with patch("app.routers.auth.send_otp_email") as send_otp:
         with patch("app.routers.auth.firebase_auth.create_user") as create_user:
             with patch("app.routers.auth.firebase_auth.create_custom_token") as custom_token:
@@ -93,10 +96,7 @@ def test_verify_otp_updates_mongo_user(client, mock_db):
                 client.post("/api/v1/auth/send-otp", json={"email": "mongo@test.com"})
                 otp_code = send_otp.call_args[0][1]
 
-                pending = mock_db.users._col.find_one({"email": "mongo@test.com"})
-                assert pending is not None
-                assert pending.get("email_verified") is False
-                assert "firebase_uid" not in pending
+                assert mock_db.users._col.find_one({"email": "mongo@test.com"}) is None
 
                 r = client.post(
                     "/api/v1/auth/verify-otp",
@@ -108,6 +108,7 @@ def test_verify_otp_updates_mongo_user(client, mock_db):
                 assert verified["firebase_uid"] == "firebase_uid_verified"
                 assert verified["email_verified"] is True
                 assert verified["last_login_at"] is not None
+                assert verified["created_at"] is not None
                 assert mock_db.email_otps._col.find_one({"email": "mongo@test.com"}) is None
 
 

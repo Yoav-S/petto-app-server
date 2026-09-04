@@ -143,26 +143,13 @@ async def send_otp(
     Works for new and returning users — always sends a 6-digit OTP.
     """
     email = body.email.lower().strip()
-    now = datetime.now(timezone.utc)
 
     try:
         existing_otp = await db.email_otps.find_one({"email": email})
         _raise_resend_cooldown(existing_otp)
 
-        await db.users.update_one(
-            {"email": email},
-            {
-                "$set": {
-                    "email": email,
-                    "auth_provider": "email",
-                    "email_verified": False,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {"created_at": now},
-            },
-            upsert=True,
-        )
-
+        # No users row yet — pending signups live in email_otps (TTL-expired) so an
+        # abandoned code entry leaves nothing behind. verify-otp creates the user.
         await _store_and_send_otp(db, email, locale=body.locale)
     except HTTPException:
         raise
@@ -202,9 +189,8 @@ async def verify_otp(
     """
     email = body.email.lower().strip()
 
+    # None for a first-time signup — the users row is created once the code checks out.
     user = await db.users.find_one({"email": email})
-    if not user:
-        raise_api_error(400, ErrorCode.OTP_INVALID)
 
     # Fixed Play review code works even if send-otp was never called / doc expired.
     review_otp = _play_review_otp_for(email)
@@ -231,7 +217,7 @@ async def verify_otp(
             raise_api_error(400, ErrorCode.OTP_INVALID)
 
     try:
-        firebase_uid = _ensure_firebase_user(email, user.get("firebase_uid"))
+        firebase_uid = _ensure_firebase_user(email, user.get("firebase_uid") if user else None)
 
         token_bytes = firebase_auth.create_custom_token(firebase_uid)
         custom_token = token_bytes.decode("utf-8") if isinstance(token_bytes, bytes) else token_bytes
@@ -241,13 +227,16 @@ async def verify_otp(
             {"email": email},
             {
                 "$set": {
+                    "email": email,
                     "firebase_uid": firebase_uid,
                     "auth_provider": "email",
                     "email_verified": True,
                     "last_login_at": now,
                     "updated_at": now,
                 },
+                "$setOnInsert": {"created_at": now},
             },
+            upsert=True,
         )
         await db.email_otps.delete_one({"email": email})
     except RefreshError:
