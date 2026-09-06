@@ -209,6 +209,82 @@ class TestReminderTabFiltering:
         assert "completed" in statuses
         assert "missed" in statuses
 
+    def test_awaiting_ack_when_today_time_passed(self, client, mock_db):
+        """Clock-passed still-scheduled rows need Done/Missed even as 'missed'."""
+        pet = make_pet(client, HEADERS_A)
+        reminder = create_reminder(client, mock_db, pet["id"], today(), time="00:00")
+        mock_db.reminders._col.update_one(
+            {"_id": ObjectId(reminder["id"])},
+            {"$set": {"notified_at": datetime.now(timezone.utc)}},
+        )
+        row = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}",
+            headers=HEADERS_A,
+        ).json()
+        assert row["status"] == "missed"
+        assert row["awaiting_ack"] is True
+
+    def test_awaiting_ack_cleared_after_user_missed(self, client, mock_db):
+        pet = make_pet(client, HEADERS_A)
+        reminder = create_reminder(client, mock_db, pet["id"], today(), time="23:59")
+        client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
+            json={"status": "missed"},
+            headers=HEADERS_A,
+        )
+        row = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}",
+            headers=HEADERS_A,
+        ).json()
+        assert row["status"] == "missed"
+        assert row["awaiting_ack"] is False
+
+    def test_alert_offset_before_now_rejected(self, client, mock_db):
+        """A 30-minute alert cannot be set on a reminder 5 minutes from now."""
+        pet = make_pet(client, HEADERS_A)
+        tz = resolve_timezone(None)
+        soon = datetime.now(tz) + timedelta(minutes=5)
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={
+                "title": "Soon",
+                "date": soon.date().isoformat(),
+                "time": f"{soon.hour:02d}:{soon.minute:02d}",
+                "alert": "30m",
+            },
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 422
+        assert r.json()["detail"]["code"] == "alert_not_possible"
+
+    def test_alert_offset_before_now_clamped_on_date_change(self, client, mock_db):
+        """Moving start closer auto-clears an alert that can no longer fire."""
+        pet = make_pet(client, HEADERS_A)
+        created = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={
+                "title": "Walk",
+                "date": future(2),
+                "time": "09:00",
+                "alert": "1d",
+            },
+            headers=HEADERS_A,
+        )
+        assert created.status_code == 201, created.text
+        reminder = created.json()
+        tz = resolve_timezone(None)
+        soon = datetime.now(tz) + timedelta(minutes=8)
+        patched = client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}",
+            json={
+                "date": soon.date().isoformat(),
+                "time": f"{soon.hour:02d}:{soon.minute:02d}",
+            },
+            headers=HEADERS_A,
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["alert"] == "off"
+
     def test_today_past_time_moves_to_recent(self, client, mock_db):
         """Same-day reminder whose clock time already passed → Recent as missed."""
         pet = make_pet(client, HEADERS_A)

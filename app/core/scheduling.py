@@ -84,6 +84,28 @@ def compute_alert_at(
     return scheduled - timedelta(minutes=minutes)
 
 
+def is_alert_possible(
+    date_str: str,
+    time_str: str,
+    tz_name: str | None,
+    alert: str | None,
+    now: datetime,
+) -> bool:
+    """True when the alert fires after now and strictly before the reminder."""
+    if not alert or alert == "off":
+        return True
+    scheduled = compute_scheduled_at(date_str, time_str, tz_name)
+    alert_at = compute_alert_at(date_str, time_str, tz_name, alert)
+    if scheduled is None or alert_at is None:
+        return False
+    if now.tzinfo is None:
+        now_utc = now.replace(tzinfo=timezone.utc)
+    else:
+        now_utc = now.astimezone(timezone.utc)
+    now_utc = now_utc.replace(second=0, microsecond=0)
+    return now_utc <= alert_at < scheduled
+
+
 def occurrence_within_end(date_str: str, end_date: str | None) -> bool:
     """True when this occurrence is allowed (no end, or date <= end)."""
     if not end_date:

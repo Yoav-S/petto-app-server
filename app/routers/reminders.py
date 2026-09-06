@@ -24,6 +24,7 @@ from app.core.database import get_database
 from app.core.scheduling import (
     resolve_timezone,
     compute_scheduled_at,
+    is_alert_possible,
     next_occurrence,
     catch_up_recurring_date,
     occurrence_within_end,
@@ -35,6 +36,7 @@ from app.core.utils import (
     validate_pet_ownership,
     validate_entity_ownership,
     compute_reminder_status,
+    reminder_awaiting_ack,
     build_reminder_tab_query,
 )
 from app.middleware.auth import get_current_user
@@ -89,6 +91,25 @@ def _assert_end_after_start(start: str, end_date: str | None) -> None:
         raise_api_error(422, ErrorCode.END_DATE_BEFORE_START)
 
 
+async def _user_timezone_name(uid: str, db: AsyncIOMotorDatabase) -> str | None:
+    user = await db.users.find_one({"firebase_uid": uid})
+    return (user or {}).get("timezone")
+
+
+async def _assert_alert_possible(
+    uid: str,
+    date: str,
+    time: str,
+    alert: str | None,
+    db: AsyncIOMotorDatabase,
+) -> None:
+    if not alert or alert == "off":
+        return
+    tz_name = await _user_timezone_name(uid, db)
+    if not is_alert_possible(date, time, tz_name, alert, datetime.now(timezone.utc)):
+        raise_api_error(422, ErrorCode.ALERT_NOT_POSSIBLE)
+
+
 def _enrich(
     doc: dict,
     today_str: str | None = None,
@@ -97,12 +118,21 @@ def _enrich(
 ) -> ReminderOut:
     """Attach server-computed status to a reminder document (in the user's tz)."""
     d = doc_to_dict(doc)
+    stored_status = d.get("status", "scheduled")
     d["status"] = compute_reminder_status(
         d.get("date", ""),
-        d.get("status", "scheduled"),
+        stored_status,
         today_str,
         reminder_time_str=d.get("time"),
         now_hm=now_hm,
+    )
+    d["awaiting_ack"] = reminder_awaiting_ack(
+        stored_status,
+        d.get("notified_at"),
+        d.get("date", ""),
+        d.get("time"),
+        today_str,
+        now_hm,
     )
     if not d.get("category"):
         d["category"] = "general"
@@ -211,6 +241,7 @@ async def create_reminder(
     await _assert_future_datetime(uid, body.date, body.time, db)
     end_date = _normalize_end_date(body.end_date)
     _assert_end_after_start(body.date, end_date)
+    await _assert_alert_possible(uid, body.date, body.time, body.alert, db)
     doc = {
         **body.model_dump(),
         "date": body.date[:10],
@@ -282,6 +313,21 @@ async def update_reminder(
         updates["end_date"] = _normalize_end_date(updates.get("end_date"))
     next_end = updates.get("end_date", existing.get("end_date"))
     _assert_end_after_start(next_date, next_end)
+
+    next_alert = updates.get("alert", existing.get("alert") or "off")
+    if next_alert and next_alert != "off":
+        tz_name = await _user_timezone_name(current_user["uid"], db)
+        alert_ok = is_alert_possible(
+            next_date,
+            next_time,
+            tz_name,
+            next_alert,
+            datetime.now(timezone.utc),
+        )
+        if not alert_ok:
+            if "alert" in updates:
+                raise_api_error(422, ErrorCode.ALERT_NOT_POSSIBLE)
+            updates["alert"] = "off"
 
     await db.reminders.update_one(
         {"_id": ObjectId(reminder_id)}, {"$set": updates}

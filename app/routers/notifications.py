@@ -366,7 +366,13 @@ async def dispatch_reminders(
         alert_at = (
             compute_alert_at(date_str, time_str, tz_name, alert) if alert_pending else None
         )
-        alert_due = bool(alert_at and alert_at <= now)
+        # Never let a past/invalid alert steal the on-time reminder.
+        alert_due = bool(
+            alert_at
+            and scheduled_at
+            and alert_at < scheduled_at
+            and alert_at <= now
+        )
         main_due = bool(scheduled_at and scheduled_at <= now and not reminder.get("notified_at"))
 
         if alert_due and not dry_run and reminders_enabled and tokens:

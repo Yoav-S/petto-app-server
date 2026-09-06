@@ -179,6 +179,38 @@ def compute_reminder_status(
     return "scheduled"
 
 
+def reminder_awaiting_ack(
+    stored_status: str,
+    notified_at,
+    reminder_date_str: str,
+    reminder_time_str: Optional[str] = None,
+    today_str: Optional[str] = None,
+    now_hm: Optional[str] = None,
+) -> bool:
+    """True when this occurrence still needs a Done/Missed answer.
+
+    Display status becomes "missed" as soon as the clock passes, but the
+    stored row stays "scheduled" until the user taps Done or Missed. The
+    in-app sheet must follow the stored state, not the display label.
+    """
+    if stored_status != "scheduled":
+        return False
+    if notified_at:
+        return True
+    if today_str is None:
+        today_str = date.today().isoformat()
+    if reminder_date_str < today_str:
+        return True
+    if (
+        reminder_date_str == today_str
+        and reminder_time_str
+        and now_hm
+        and reminder_time_str[:5] <= now_hm[:5]
+    ):
+        return True
+    return False
+
+
 def build_reminder_tab_query(
     pet_id: str,
     tab: str,
