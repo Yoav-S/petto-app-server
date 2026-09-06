@@ -45,6 +45,33 @@ from app.models.notification import (
 router = APIRouter(tags=["notifications"])
 logger = logging.getLogger("petto")
 
+
+def _reminder_push_message(
+    token: str,
+    *,
+    title: str,
+    body: str,
+    reminder_id: str,
+    pet_id: str | None,
+    kind: str,
+) -> dict:
+    """kind is 'alert' or 'main' so Android/iOS do not collapse the two fires."""
+    return {
+        "to": token,
+        "title": title,
+        "body": body,
+        "sound": "default",
+        "channelId": "default",
+        "priority": "high",
+        "collapseId": f"{reminder_id}:{kind}",
+        "data": {
+            "type": "reminder",
+            "kind": kind,
+            "reminderId": reminder_id,
+            "petId": pet_id,
+        },
+    }
+
 # All switches default ON — a fresh user receives everything until they opt out.
 DEFAULT_NOTIFICATION_PREFS = {
     "all": True,
@@ -309,7 +336,6 @@ async def dispatch_reminders(
         tz_name = await get_tz(uid)
         date_str = reminder.get("date", "")
         time_str = reminder.get("time", "")
-        repeat = reminder.get("repeat") or "off"
 
         end_date = reminder.get("end_date")
         if not occurrence_within_end(date_str, end_date):
@@ -325,44 +351,9 @@ async def dispatch_reminders(
             )
             continue
 
-        # Recurring series that sat overdue for days: jump to the next future
-        # slot instead of re-firing for every skipped day on each login.
-        if repeat != "off":
-            caught_up = catch_up_recurring_date(
-                date_str,
-                time_str,
-                repeat,
-                tz_name,
-                after=now,
-                end_date=end_date,
-            )
-            if caught_up and caught_up != date_str:
-                await db.reminders.update_one(
-                    {"_id": reminder["_id"]},
-                    {
-                        "$set": {
-                            "date": caught_up,
-                            "notified_at": None,
-                            "alert_notified_at": None,
-                        }
-                    },
-                )
-                date_str = caught_up
-                reminder["date"] = caught_up
-                reminder["notified_at"] = None
-                reminder["alert_notified_at"] = None
-            elif caught_up is None and not occurrence_within_end(date_str, end_date):
-                await db.reminders.update_one(
-                    {"_id": reminder["_id"]},
-                    {
-                        "$set": {
-                            "status": "completed",
-                            "notified_at": None,
-                            "alert_notified_at": None,
-                        }
-                    },
-                )
-                continue
+        # Do not catch up here. catch_up_recurring_date treats scheduled_at <= now
+        # as overdue and jumps to the next date, which skips the on-time push.
+        # Already-notified overdue series are advanced in the pre-pass above.
 
         scheduled_at = compute_scheduled_at(date_str, time_str, tz_name)
         tokens = await get_tokens(uid)
@@ -380,19 +371,14 @@ async def dispatch_reminders(
 
         if alert_due and not dry_run and reminders_enabled and tokens:
             alert_messages = [
-                {
-                    "to": token,
-                    "title": "Reminder",
-                    "body": reminder.get("title") or "Reminder",
-                    "sound": "default",
-                    "channelId": "default",
-                    "priority": "high",
-                    "data": {
-                        "type": "reminder",
-                        "reminderId": reminder_id,
-                        "petId": reminder.get("pet_id"),
-                    },
-                }
+                _reminder_push_message(
+                    token,
+                    title="Reminder",
+                    body=reminder.get("title") or "Reminder",
+                    reminder_id=reminder_id,
+                    pet_id=reminder.get("pet_id"),
+                    kind="alert",
+                )
                 for token in tokens
             ]
             try:
@@ -477,19 +463,14 @@ async def dispatch_reminders(
             continue
 
         messages = [
-            {
-                "to": token,
-                "title": "Reminder",
-                "body": reminder.get("title") or "Reminder",
-                "sound": "default",
-                "channelId": "default",
-                "priority": "high",
-                "data": {
-                    "type": "reminder",
-                    "reminderId": reminder_id,
-                    "petId": reminder.get("pet_id"),
-                },
-            }
+            _reminder_push_message(
+                token,
+                title="Reminder",
+                body=reminder.get("title") or "Reminder",
+                reminder_id=reminder_id,
+                pet_id=reminder.get("pet_id"),
+                kind="main",
+            )
             for token in tokens
         ]
         try:
