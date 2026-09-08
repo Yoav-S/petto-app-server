@@ -91,8 +91,8 @@ class ReminderOut(BaseModel):
     status: str
     created_at: datetime
     # Set once a push notification has been sent for this occurrence.
-    # Cleared when the user marks Done/Missed (and when a recurring reminder
-    # rolls forward to its next occurrence).
+    # Cleared when the user marks Done/Missed. Repeating reminders keep this
+    # row in Recent and insert a new document for the next date.
     notified_at: Optional[datetime] = None
     alert_notified_at: Optional[datetime] = None
     # Stored status is still scheduled and this occurrence is due / was pushed.

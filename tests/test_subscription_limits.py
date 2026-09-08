@@ -152,3 +152,39 @@ class TestFreePlanReminders:
             headers=HEADERS_A,
         )
         assert created.status_code == 201
+
+    def test_repeating_series_counts_as_one_slot(self, client, monkeypatch):
+        """Today + spawned upcoming for the same series is still one free slot."""
+        import app.core.subscription as sub
+
+        monkeypatch.setattr(sub, "FREE_MAX_ACTIVE_REMINDERS", 1)
+        pet = make_pet(client, HEADERS_A)
+        existing = make_reminder(
+            client,
+            pet["id"],
+            HEADERS_A,
+            date="2099-01-01",
+            time="09:00",
+            repeat="every_day",
+        )
+        client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{existing['id']}/status",
+            json={"status": "completed"},
+            headers=HEADERS_A,
+        )
+        blocked = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders",
+            json={
+                "title": "Another series",
+                "date": "2099-01-03",
+                "time": "09:00",
+                "repeat": "off",
+            },
+            headers=HEADERS_A,
+        )
+        assert blocked.status_code == 403
+        upcoming = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
+        ).json()
+        assert len(upcoming) == 1
+        assert upcoming[0]["id"] != existing["id"]

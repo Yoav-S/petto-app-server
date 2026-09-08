@@ -25,10 +25,8 @@ from app.core.scheduling import (
     resolve_timezone,
     compute_scheduled_at,
     is_alert_possible,
-    next_occurrence,
-    catch_up_recurring_date,
-    occurrence_within_end,
 )
+from app.core.reminder_series import spawn_following_occurrences
 from app.core.subscription import can_add_active_reminder
 from app.core.utils import (
     doc_to_dict,
@@ -242,8 +240,10 @@ async def create_reminder(
     end_date = _normalize_end_date(body.end_date)
     _assert_end_after_start(body.date, end_date)
     await _assert_alert_possible(uid, body.date, body.time, body.alert, db)
+    oid = ObjectId()
     doc = {
         **body.model_dump(),
+        "_id": oid,
         "date": body.date[:10],
         "end_date": end_date,
         "alert": body.alert or "off",
@@ -251,10 +251,11 @@ async def create_reminder(
         "status": "scheduled",       # stored status — computed on read
         "notified_at": None,         # set once a push has been sent (dispatcher)
         "alert_notified_at": None,
+        "next_spawned": False,
+        "series_id": str(oid),
         "created_at": datetime.now(timezone.utc),
     }
-    result = await db.reminders.insert_one(doc)
-    doc["_id"] = result.inserted_id
+    await db.reminders.insert_one(doc)
     today_str, now_hm = await _user_local_clock(uid, db)
     return _enrich(doc, today_str, now_hm=now_hm)
 
@@ -350,11 +351,10 @@ async def update_reminder_status(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """
-    Mark a reminder occurrence as completed or missed.
+    Mark this occurrence as completed or missed.
 
-    One-off reminders store the terminal status. Recurring reminders roll
-    forward to the next *future* occurrence (skipping overdue days) so the
-    series continues without re-prompting for every skipped day.
+    The row stays on this date in Recent with that mark. Repeating reminders
+    also insert the next date (Upcoming / Today) if it does not exist yet.
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
     reminder = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
@@ -362,45 +362,20 @@ async def update_reminder_status(
     uid = current_user["uid"]
     user = await db.users.find_one({"firebase_uid": uid})
     tz_name = (user or {}).get("timezone")
-    repeat = reminder.get("repeat") or "off"
     now = datetime.now(timezone.utc)
 
-    next_date = next_occurrence(reminder.get("date", ""), repeat)
-    end_date = reminder.get("end_date")
-    if next_date and occurrence_within_end(next_date, end_date):
-        # Jump past any slots that are already overdue so Done on an old
-        # daily reminder doesn't come back on the next login.
-        future = catch_up_recurring_date(
-            next_date,
-            reminder.get("time", ""),
-            repeat,
-            tz_name,
-            after=now,
-            end_date=end_date,
-        )
-        roll_to = future or next_date
-        if occurrence_within_end(roll_to, end_date):
-            await db.reminders.update_one(
-                {"_id": ObjectId(reminder_id)},
-                {
-                    "$set": {
-                        "date": roll_to,
-                        "status": "scheduled",
-                        "notified_at": None,
-                        "alert_notified_at": None,
-                    }
-                },
-            )
-        else:
-            await db.reminders.update_one(
-                {"_id": ObjectId(reminder_id)},
-                {"$set": {"status": body.status, "notified_at": None, "alert_notified_at": None}},
-            )
-    else:
-        await db.reminders.update_one(
-            {"_id": ObjectId(reminder_id)},
-            {"$set": {"status": body.status, "notified_at": None, "alert_notified_at": None}},
-        )
+    await db.reminders.update_one(
+        {"_id": ObjectId(reminder_id)},
+        {
+            "$set": {
+                "status": body.status,
+                "notified_at": None,
+                "alert_notified_at": None,
+            }
+        },
+    )
+    if not reminder.get("next_spawned"):
+        await spawn_following_occurrences(db, reminder, tz_name, now)
 
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
     today_str, now_hm = await _user_local_clock(uid, db)

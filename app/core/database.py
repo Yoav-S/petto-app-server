@@ -42,6 +42,12 @@ async def connect_to_db() -> None:
     await _db.reminders.create_index([("pet_id", 1), ("status", 1)])
     # reminders — dispatcher scan for un-notified scheduled reminders
     await _db.reminders.create_index([("status", 1), ("notified_at", 1)])
+    # One document per calendar day in a repeating series
+    await _db.reminders.create_index(
+        [("series_id", 1), ("date", 1)],
+        unique=True,
+        sparse=True,
+    )
 
     # push_tokens — one document per device token, look up by user
     await _db.push_tokens.create_index("token", unique=True)

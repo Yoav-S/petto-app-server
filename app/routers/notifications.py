@@ -27,10 +27,10 @@ from app.core.database import get_database
 from app.core.push import is_dead_token_ticket, send_expo_push
 from app.core.scheduling import (
     compute_scheduled_at,
-    catch_up_recurring_date,
     compute_alert_at,
     occurrence_within_end,
 )
+from app.core.reminder_series import spawn_following_occurrences
 from app.core.subscription import is_pet_locked_for_owner
 from app.core.utils import is_valid_object_id
 from app.middleware.auth import get_current_user
@@ -219,14 +219,24 @@ async def dispatch_reminders(
     """Find every reminder whose local date/time has arrived and push it."""
     now = datetime.now(timezone.utc)
 
-    # Stuck overdue recurring items already have notified_at, so they never
-    # appear in the due-candidates query below. Catch them up first or they
-    # keep prompting on every app login forever.
+    async def mark_main_fired(reminder: dict, tz_name: str | None) -> None:
+        """Keep this occurrence in Recent and insert the next repeating date."""
+        await spawn_following_occurrences(db, reminder, tz_name, now)
+        await db.reminders.update_one(
+            {"_id": reminder["_id"]},
+            {"$set": {"notified_at": now, "next_spawned": True}},
+        )
+        reminder["notified_at"] = now
+        reminder["next_spawned"] = True
+
+    # Repeating rows that already fired but never spawned the next date
+    # (crash / older dispatcher). Do not roll the date — keep the mark.
     stuck = await db.reminders.find(
         {
             "status": "scheduled",
             "repeat": {"$nin": ["off", None, ""]},
             "notified_at": {"$ne": None},
+            "next_spawned": {"$ne": True},
         }
     ).to_list(None)
     for reminder in stuck:
@@ -240,23 +250,11 @@ async def dispatch_reminders(
         uid = pet.get("user_id")
         user = await db.users.find_one({"firebase_uid": uid})
         tz_name = (user or {}).get("timezone")
-        caught_up = catch_up_recurring_date(
-            reminder.get("date", ""),
-            reminder.get("time", ""),
-            reminder.get("repeat") or "off",
-            tz_name,
-            after=now,
-            end_date=reminder.get("end_date"),
-        )
-        if caught_up and caught_up != reminder.get("date"):
-            await db.reminders.update_one(
-                {"_id": reminder["_id"]},
-                {"$set": {"date": caught_up, "notified_at": None, "alert_notified_at": None}},
-            )
+        if not dry_run:
+            await spawn_following_occurrences(db, reminder, tz_name, now)
             logger.info(
-                "caught up stuck recurring reminder %s -> %s",
+                "spawned next occurrence for stuck recurring reminder %s",
                 reminder["_id"],
-                caught_up,
             )
 
     candidates = await db.reminders.find(
@@ -351,10 +349,6 @@ async def dispatch_reminders(
             )
             continue
 
-        # Do not catch up here. catch_up_recurring_date treats scheduled_at <= now
-        # as overdue and jumps to the next date, which skips the on-time push.
-        # Already-notified overdue series are advanced in the pre-pass above.
-
         scheduled_at = compute_scheduled_at(date_str, time_str, tz_name)
         tokens = await get_tokens(uid)
         prefs = await get_prefs(uid)
@@ -379,7 +373,7 @@ async def dispatch_reminders(
             alert_messages = [
                 _reminder_push_message(
                     token,
-                    title="Reminder",
+                    title="Alert",
                     body=reminder.get("title") or "Reminder",
                     reminder_id=reminder_id,
                     pet_id=reminder.get("pet_id"),
@@ -442,10 +436,7 @@ async def dispatch_reminders(
         if not reminders_enabled:
             # User opted out — still mark notified so the in-app Done/Missed
             # prompt can appear; they chose not to get a push.
-            await db.reminders.update_one(
-                {"_id": reminder["_id"]},
-                {"$set": {"notified_at": now}},
-            )
+            await mark_main_fired(reminder, tz_name)
             processed += 1
             item["delivered"] = False
             item["reason"] = "notifications_disabled"
@@ -457,10 +448,7 @@ async def dispatch_reminders(
             # No device token yet (Expo Go / permissions). Still mark notified
             # so opening the app can show the status sheet; push will work once
             # a token is registered for future reminders.
-            await db.reminders.update_one(
-                {"_id": reminder["_id"]},
-                {"$set": {"notified_at": now}},
-            )
+            await mark_main_fired(reminder, tz_name)
             processed += 1
             item["delivered"] = False
             item["reason"] = "no_tokens"
@@ -488,10 +476,7 @@ async def dispatch_reminders(
             item["error"] = str(exc)
             items.append(item)
             # Still mark notified so the in-app sheet can show.
-            await db.reminders.update_one(
-                {"_id": reminder["_id"]},
-                {"$set": {"notified_at": now}},
-            )
+            await mark_main_fired(reminder, tz_name)
             processed += 1
             continue
 
@@ -500,13 +485,9 @@ async def dispatch_reminders(
                 await db.push_tokens.delete_one({"token": token})
                 logger.info("pruned dead push token for user %s", uid)
 
-        # Mark as notified but keep the occurrence date until the user taps
-        # Done / Missed. Recurring rollover happens in PATCH .../status so the
-        # client can still prompt for this fire.
-        await db.reminders.update_one(
-            {"_id": reminder["_id"]},
-            {"$set": {"notified_at": now}},
-        )
+        # This occurrence stays on its date. Repeating series get a new
+        # document for the next date so Recent keeps today's Done/Missed mark.
+        await mark_main_fired(reminder, tz_name)
 
         processed += 1
         item["delivered"] = any(t.get("status") == "ok" for t in tickets)

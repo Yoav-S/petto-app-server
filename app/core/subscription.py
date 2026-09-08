@@ -99,13 +99,16 @@ async def count_active_reminders(
             ids.append(str(pet["_id"]))
     if not ids:
         return 0
-    return await db.reminders.count_documents(
+    docs = await db.reminders.find(
         {
             "pet_id": {"$in": ids},
             "status": "scheduled",
             "date": {"$gte": today_str},
         }
-    )
+    ).to_list(None)
+    # Repeating series keep both the due occurrence and the next upcoming
+    # row. Count the series, not each spawned document.
+    return len({d.get("series_id") or str(d["_id"]) for d in docs})
 
 
 async def can_add_active_reminder(

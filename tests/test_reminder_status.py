@@ -112,6 +112,74 @@ class TestReminderStatusComputation:
         assert r.status_code == 200
         assert r.json()["status"] == "missed"
 
+    def test_recurring_done_keeps_occurrence_and_spawns_next(self, client, mock_db):
+        """Done on a repeating row stays in Recent; next date is a new item."""
+        pet = make_pet(client, HEADERS_A)
+        reminder = create_reminder(
+            client,
+            mock_db,
+            pet["id"],
+            today(),
+            time="23:59",
+            repeat="every_day",
+            title="Walk",
+        )
+
+        first = client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
+            json={"status": "completed"},
+            headers=HEADERS_A,
+        )
+        assert first.status_code == 200
+        assert first.json()["id"] == reminder["id"]
+        assert first.json()["date"] == today()
+        assert first.json()["status"] == "completed"
+
+        recent = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
+        ).json()
+        upcoming = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
+        ).json()
+        assert any(item["id"] == reminder["id"] and item["status"] == "completed" for item in recent)
+        assert len(upcoming) == 1
+        assert upcoming[0]["id"] != reminder["id"]
+        assert upcoming[0]["date"] == future(1)
+        assert upcoming[0]["title"] == "Walk"
+        assert upcoming[0]["status"] == "scheduled"
+
+    def test_recurring_occurrences_keep_independent_marks(self, client, mock_db):
+        pet = make_pet(client, HEADERS_A)
+        first = create_reminder(
+            client,
+            mock_db,
+            pet["id"],
+            today(),
+            time="23:59",
+            repeat="every_day",
+            title="Pills",
+        )
+        client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{first['id']}/status",
+            json={"status": "completed"},
+            headers=HEADERS_A,
+        )
+        nxt = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
+        ).json()[0]
+        client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{nxt['id']}/status",
+            json={"status": "missed"},
+            headers=HEADERS_A,
+        )
+
+        recent = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
+        ).json()
+        by_id = {item["id"]: item for item in recent}
+        assert by_id[first["id"]]["status"] == "completed"
+        assert by_id[nxt["id"]]["status"] == "missed"
+
     def test_recurring_stops_when_next_occurrence_after_end(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
         start = future(1)
@@ -136,16 +204,27 @@ class TestReminderStatusComputation:
             headers=HEADERS_A,
         )
         assert first.status_code == 200
-        assert first.json()["date"] == end
-        assert first.json()["status"] == "scheduled"
+        assert first.json()["date"] == start
+        assert first.json()["status"] == "completed"
+
+        upcoming = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
+        ).json()
+        assert len(upcoming) == 1
+        assert upcoming[0]["date"] == end
 
         second = client.patch(
-            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
+            f"/api/v1/pets/{pet['id']}/reminders/{upcoming[0]['id']}/status",
             json={"status": "completed"},
             headers=HEADERS_A,
         )
         assert second.status_code == 200
         assert second.json()["status"] == "completed"
+
+        leftover = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
+        ).json()
+        assert leftover == []
 
     def test_invalid_status_value_rejected(self, client, mock_db):
         """Status must be 'completed' or 'missed' — anything else is 422."""
