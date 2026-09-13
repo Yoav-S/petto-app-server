@@ -366,12 +366,14 @@ async def update_reminder_status(
     user = await db.users.find_one({"firebase_uid": uid})
     tz_name = (user or {}).get("timezone")
     now = datetime.now(timezone.utc)
+    occurrence_date = reminder.get("date")
 
     await db.reminders.update_one(
         {"_id": ObjectId(reminder_id)},
         {
             "$set": {
                 "status": body.status,
+                "date": occurrence_date,
                 "notified_at": None,
                 "alert_notified_at": None,
             }
@@ -381,6 +383,12 @@ async def update_reminder_status(
         await spawn_following_occurrences(db, reminder, tz_name, now)
 
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
+    if updated and updated.get("date") != occurrence_date:
+        await db.reminders.update_one(
+            {"_id": ObjectId(reminder_id)},
+            {"$set": {"date": occurrence_date, "status": body.status}},
+        )
+        updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
     today_str, now_hm = await _user_local_clock(uid, db)
     return _enrich(updated, today_str, now_hm=now_hm)
 
