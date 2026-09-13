@@ -128,6 +128,41 @@ def next_occurrence(date_str: str, repeat: str) -> str | None:
     return (datetime(year, month, day) + step).strftime("%Y-%m-%d")
 
 
+def next_occurrence_on_or_after(
+    after_date: str,
+    repeat: str,
+    on_or_after: str,
+) -> str | None:
+    """First occurrence after ``after_date`` that is on or after ``on_or_after``."""
+    nxt = next_occurrence(after_date, repeat)
+    if not nxt:
+        return None
+    if nxt >= on_or_after:
+        return nxt
+    step = _REPEAT_STEPS.get(repeat)
+    if step is None:
+        return None
+    try:
+        current = datetime.strptime(nxt, "%Y-%m-%d")
+        cutoff = datetime.strptime(on_or_after, "%Y-%m-%d")
+    except ValueError:
+        return None
+    if repeat == "every_day":
+        return on_or_after
+    if repeat == "every_2_days":
+        days = (cutoff.date() - current.date()).days
+        k = (days + 1) // 2
+        landed = current + relativedelta(days=2 * k)
+        if landed.date() < cutoff.date():
+            landed = landed + relativedelta(days=2)
+        return landed.strftime("%Y-%m-%d")
+    for _ in range(4000):
+        if current.date() >= cutoff.date():
+            return current.strftime("%Y-%m-%d")
+        current = current + step
+    return None
+
+
 def catch_up_recurring_date(
     date_str: str,
     time_str: str,

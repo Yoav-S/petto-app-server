@@ -255,3 +255,16 @@ def build_reminder_tab_query(
             overdue_today,
         ],
     }
+
+
+def one_live_per_series(docs: list[dict]) -> list[dict]:
+    """Keep the first row of each series (caller must sort soonest-first)."""
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for doc in docs:
+        series_id = str(doc.get("series_id") or doc.get("_id"))
+        if series_id in seen:
+            continue
+        seen.add(series_id)
+        unique.append(doc)
+    return unique

@@ -36,6 +36,7 @@ from app.core.utils import (
     compute_reminder_status,
     reminder_awaiting_ack,
     build_reminder_tab_query,
+    one_live_per_series,
 )
 from app.middleware.auth import get_current_user
 from app.models.reminder import (
@@ -209,6 +210,8 @@ async def list_reminders(
                 ]
 
     docs = await db.reminders.find(query, sort=sort).to_list(limit or None)
+    if tab in ("today", "upcoming"):
+        docs = one_live_per_series(docs)
     if limit:
         docs = docs[:limit]
     return [_enrich(d, today_str, now_hm=now_hm) for d in docs]
