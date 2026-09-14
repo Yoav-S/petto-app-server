@@ -46,6 +46,7 @@ def _occurrence_template(source: dict, date_str: str, series_id: str, now: datet
     doc["status"] = "scheduled"
     doc["notified_at"] = None
     doc["alert_notified_at"] = None
+    doc["needs_ack"] = False
     doc["next_spawned"] = False
     doc["series_id"] = series_id
     doc["created_at"] = now
@@ -182,6 +183,7 @@ async def spawn_following_occurrences(
             doc = _occurrence_template(reminder, candidate, series_id, now_utc)
             doc["notified_at"] = now_utc
             doc["alert_notified_at"] = now_utc
+            doc["needs_ack"] = True
             doc["next_spawned"] = True
             try:
                 result = await db.reminders.insert_one(doc)

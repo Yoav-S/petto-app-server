@@ -242,15 +242,23 @@ def build_reminder_tab_query(
             "date": today_str,
             "status": "scheduled",
             "notified_at": None,
+            "needs_ack": {"$ne": True},
         }
         if hm:
             query["time"] = {"$gte": hm}
         return query
 
     if tab == "upcoming":
-        return {**base, "date": {"$gt": today_str}, "status": "scheduled"}
+        return {
+            **base,
+            "date": {"$gt": today_str},
+            "status": "scheduled",
+            "notified_at": None,
+            "needs_ack": {"$ne": True},
+        }
 
-    # tab == "recent"
+    # tab == "recent" — every fired occurrence lives here, including
+    # repeating rows that still need Done/Missed.
     overdue_today: dict = {"date": today_str, "status": "scheduled"}
     if hm:
         overdue_today["time"] = {"$lt": hm}
@@ -261,6 +269,7 @@ def build_reminder_tab_query(
             {"date": {"$lt": today_str}, "status": "scheduled"},
             overdue_today,
             {"status": "scheduled", "notified_at": {"$ne": None}},
+            {"needs_ack": True},
         ],
     }
 

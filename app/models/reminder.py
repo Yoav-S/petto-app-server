@@ -98,3 +98,4 @@ class ReminderOut(BaseModel):
     # Stored status is still scheduled and this occurrence is due / was pushed.
     # Display `status` may already be "missed" after the clock passes.
     awaiting_ack: bool = False
+    series_id: Optional[str] = None

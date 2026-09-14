@@ -211,8 +211,25 @@ class TestReminderStatusComputation:
             f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
         ).json()
         by_id = {item["id"]: item for item in recent}
-        assert by_id[first["id"]]["status"] == "completed"
+        assert nxt["id"] in by_id
         assert by_id[nxt["id"]]["status"] == "missed"
+        assert first["id"] not in by_id
+
+        all_recent = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent&collapse=false",
+            headers=HEADERS_A,
+        ).json()
+        all_by_id = {item["id"]: item for item in all_recent}
+        assert all_by_id[first["id"]]["status"] == "completed"
+        assert all_by_id[nxt["id"]]["status"] == "missed"
+
+        history = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders/{nxt['id']}/history",
+            headers=HEADERS_A,
+        ).json()
+        history_by_id = {item["id"]: item for item in history}
+        assert history_by_id[first["id"]]["status"] == "completed"
+        assert history_by_id[nxt["id"]]["status"] == "missed"
 
     def test_recurring_stops_when_next_occurrence_after_end(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)

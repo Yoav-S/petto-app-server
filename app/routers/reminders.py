@@ -174,6 +174,7 @@ async def list_reminders(
     tab: str = Query("today", pattern="^(today|upcoming|recent)$"),
     limit: Optional[int] = Query(None, ge=1, le=50),
     cursor: Optional[str] = Query(None),
+    collapse: bool = Query(True),
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
@@ -182,6 +183,9 @@ async def list_reminders(
     Sorting:
       today/upcoming → soonest first (date ASC)
       recent         → most recent first (date DESC)
+
+    Recent collapse (default): one row per series — the last fire.
+    Pass collapse=false to return every fired occurrence (Done/Missed queue).
     Pagination: pass limit + cursor (last item id) for the next page.
     """
     await validate_pet_ownership(pet_id, current_user["uid"], db)
@@ -189,29 +193,43 @@ async def list_reminders(
     query = build_reminder_tab_query(pet_id, tab, today_str, now_hm=now_hm)
     sort_dir = 1 if tab in ("today", "upcoming") else -1
     sort = [("date", sort_dir), ("time", sort_dir), ("_id", sort_dir)]
+    collapse_recent = tab == "recent" and collapse
 
-    if cursor and is_valid_object_id(cursor):
-        last = await db.reminders.find_one({"_id": ObjectId(cursor)})
-        if last:
-            last_date = last.get("date")
-            last_time = last.get("time") or ""
-            last_id = ObjectId(cursor)
-            if sort_dir == 1:
-                query["$or"] = [
-                    {"date": {"$gt": last_date}},
-                    {"date": last_date, "time": {"$gt": last_time}},
-                    {"date": last_date, "time": last_time, "_id": {"$gt": last_id}},
-                ]
-            else:
-                query["$or"] = [
-                    {"date": {"$lt": last_date}},
-                    {"date": last_date, "time": {"$lt": last_time}},
-                    {"date": last_date, "time": last_time, "_id": {"$lt": last_id}},
-                ]
-
-    docs = await db.reminders.find(query, sort=sort).to_list(limit or None)
-    if tab in ("today", "upcoming"):
+    if collapse_recent:
+        docs = await db.reminders.find(query, sort=sort).to_list(None)
         docs = one_live_per_series(docs)
+        if cursor and is_valid_object_id(cursor):
+            after = False
+            trimmed: list[dict] = []
+            for doc in docs:
+                if after:
+                    trimmed.append(doc)
+                elif str(doc["_id"]) == cursor:
+                    after = True
+            docs = trimmed
+    else:
+        if cursor and is_valid_object_id(cursor):
+            last = await db.reminders.find_one({"_id": ObjectId(cursor)})
+            if last:
+                last_date = last.get("date")
+                last_time = last.get("time") or ""
+                last_id = ObjectId(cursor)
+                if sort_dir == 1:
+                    query["$or"] = [
+                        {"date": {"$gt": last_date}},
+                        {"date": last_date, "time": {"$gt": last_time}},
+                        {"date": last_date, "time": last_time, "_id": {"$gt": last_id}},
+                    ]
+                else:
+                    query["$or"] = [
+                        {"date": {"$lt": last_date}},
+                        {"date": last_date, "time": {"$lt": last_time}},
+                        {"date": last_date, "time": last_time, "_id": {"$lt": last_id}},
+                    ]
+        docs = await db.reminders.find(query, sort=sort).to_list(limit or None)
+        if tab in ("today", "upcoming"):
+            docs = one_live_per_series(docs)
+
     if limit:
         docs = docs[:limit]
     return [_enrich(d, today_str, now_hm=now_hm) for d in docs]
@@ -254,6 +272,7 @@ async def create_reminder(
         "status": "scheduled",       # stored status — computed on read
         "notified_at": None,         # set once a push has been sent (dispatcher)
         "alert_notified_at": None,
+        "needs_ack": False,
         "next_spawned": False,
         "series_id": str(oid),
         "created_at": datetime.now(timezone.utc),
@@ -278,6 +297,43 @@ async def get_reminder(
     doc = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
     today_str, now_hm = await _user_local_clock(current_user["uid"], db)
     return _enrich(doc, today_str, now_hm=now_hm)
+
+
+@router.get("/{reminder_id}/history", response_model=list[ReminderOut])
+async def list_reminder_fire_history(
+    pet_id: str,
+    reminder_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Every fired occurrence in this series, newest first."""
+    await validate_pet_ownership(pet_id, current_user["uid"], db)
+    reminder = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
+    today_str, now_hm = await _user_local_clock(current_user["uid"], db)
+    series_id = reminder.get("series_id") or str(reminder["_id"])
+    query = {
+        "pet_id": pet_id,
+        "$and": [
+            {
+                "$or": [
+                    {"series_id": series_id},
+                    {"_id": reminder["_id"]},
+                ]
+            },
+            {
+                "$or": [
+                    {"status": {"$in": ["completed", "missed"]}},
+                    {"notified_at": {"$ne": None}},
+                    {"needs_ack": True},
+                    {"date": {"$lt": today_str}, "status": "scheduled"},
+                ]
+            },
+        ],
+    }
+    docs = await db.reminders.find(
+        query, sort=[("date", -1), ("time", -1), ("_id", -1)]
+    ).to_list(None)
+    return [_enrich(d, today_str, now_hm=now_hm) for d in docs]
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +436,7 @@ async def update_reminder_status(
                 "date": occurrence_date,
                 "notified_at": None,
                 "alert_notified_at": None,
+                "needs_ack": False,
             }
         },
     )

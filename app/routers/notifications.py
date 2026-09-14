@@ -228,12 +228,14 @@ async def dispatch_reminders(
             {
                 "$set": {
                     "notified_at": now,
+                    "needs_ack": True,
                     "next_spawned": True,
                     "date": occurrence_date,
                 }
             },
         )
         reminder["notified_at"] = now
+        reminder["needs_ack"] = True
         reminder["next_spawned"] = True
         reminder["date"] = occurrence_date
 

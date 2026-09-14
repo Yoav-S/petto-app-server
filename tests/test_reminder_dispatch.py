@@ -57,6 +57,11 @@ class TestReminderDispatchSeries:
             f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
         ).json()
         assert any(item["id"] == reminder["id"] for item in recent)
+        assert all(item["id"] != reminder["id"] for item in upcoming)
+        today_items = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=today", headers=HEADERS_A
+        ).json()
+        assert all(item["id"] != reminder["id"] for item in today_items)
         assert len(upcoming) == 1
         assert upcoming[0]["date"] == future(1)
         assert upcoming[0]["title"] == "Walk"
@@ -125,15 +130,21 @@ class TestReminderDispatchSeries:
         recent = client.get(
             f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
         ).json()
+        fires = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent&collapse=false",
+            headers=HEADERS_A,
+        ).json()
         upcoming = client.get(
             f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
         ).json()
-        recent_dates = {item["date"] for item in recent}
-        assert start in recent_dates
-        assert today() in recent_dates
+        fire_dates = {item["date"] for item in fires}
+        assert start in fire_dates
+        assert today() in fire_dates
+        assert len(recent) == 1
+        assert recent[0]["date"] == today()
         assert len(upcoming) == 1
         assert upcoming[0]["date"] == future(1)
-        original = next(item for item in recent if item["id"] == reminder["id"])
+        original = next(item for item in fires if item["id"] == reminder["id"])
         assert original["date"] == start
 
     def test_long_outage_caps_catchup_and_keeps_one_upcoming(self, client, mock_db):
@@ -159,12 +170,18 @@ class TestReminderDispatchSeries:
         recent = client.get(
             f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
         ).json()
+        fires = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent&collapse=false",
+            headers=HEADERS_A,
+        ).json()
         assert len(upcoming) == 1
         assert upcoming[0]["date"] == future(1)
         series_upcoming = [item for item in upcoming if item["title"] == "Walk"]
         assert len(series_upcoming) == 1
+        assert len(recent) == 1
+        assert recent[0]["date"] == today()
         catchup_dates = sorted(
-            item["date"] for item in recent if item["date"] != start
+            item["date"] for item in fires if item["date"] != start
         )
         assert catchup_dates
         assert catchup_dates[0] >= past(14)
