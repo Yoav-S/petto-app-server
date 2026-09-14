@@ -221,13 +221,21 @@ async def dispatch_reminders(
 
     async def mark_main_fired(reminder: dict, tz_name: str | None) -> None:
         """Keep this occurrence in Recent and insert the next repeating date."""
+        occurrence_date = reminder.get("date")
         await spawn_following_occurrences(db, reminder, tz_name, now)
         await db.reminders.update_one(
             {"_id": reminder["_id"]},
-            {"$set": {"notified_at": now, "next_spawned": True}},
+            {
+                "$set": {
+                    "notified_at": now,
+                    "next_spawned": True,
+                    "date": occurrence_date,
+                }
+            },
         )
         reminder["notified_at"] = now
         reminder["next_spawned"] = True
+        reminder["date"] = occurrence_date
 
     # Repeating rows that already fired but never spawned the next date
     # (crash / older dispatcher). Do not roll the date — keep the mark.
@@ -374,7 +382,7 @@ async def dispatch_reminders(
                 _reminder_push_message(
                     token,
                     title="Alert",
-                    body=reminder.get("title") or "Reminder",
+                    body="Alert",
                     reminder_id=reminder_id,
                     pet_id=reminder.get("pet_id"),
                     kind="alert",

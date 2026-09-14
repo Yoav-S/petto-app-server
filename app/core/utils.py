@@ -221,11 +221,13 @@ def build_reminder_tab_query(
     """
     Build a MongoDB filter dict for the reminders tab endpoint.
 
-    today    → date == today, stored scheduled, time still upcoming (if now_hm)
+    today    → date == today, stored scheduled, time still upcoming (if now_hm),
+               and the main reminder has not fired yet
     upcoming → date >  today, stored scheduled
     recent   → completed | missed
                OR past calendar day still scheduled
                OR today + scheduled + time already passed
+               OR scheduled with notified_at (this occurrence already fired)
 
     today_str / now_hm should be the user's local date/time.
     """
@@ -235,7 +237,12 @@ def build_reminder_tab_query(
     hm = (now_hm or "")[:5]
 
     if tab == "today":
-        query: dict = {**base, "date": today_str, "status": "scheduled"}
+        query: dict = {
+            **base,
+            "date": today_str,
+            "status": "scheduled",
+            "notified_at": None,
+        }
         if hm:
             query["time"] = {"$gte": hm}
         return query
@@ -253,6 +260,7 @@ def build_reminder_tab_query(
             {"status": {"$in": ["completed", "missed"]}},
             {"date": {"$lt": today_str}, "status": "scheduled"},
             overdue_today,
+            {"status": "scheduled", "notified_at": {"$ne": None}},
         ],
     }
 

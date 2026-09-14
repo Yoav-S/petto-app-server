@@ -363,6 +363,10 @@ async def update_reminder_status(
     reminder = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
 
     uid = current_user["uid"]
+    today_str, now_hm = await _user_local_clock(uid, db)
+    if reminder.get("status") in ("completed", "missed"):
+        return _enrich(reminder, today_str, now_hm=now_hm)
+
     user = await db.users.find_one({"firebase_uid": uid})
     tz_name = (user or {}).get("timezone")
     now = datetime.now(timezone.utc)

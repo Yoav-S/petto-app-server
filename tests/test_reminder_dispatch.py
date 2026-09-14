@@ -1,6 +1,7 @@
 """Dispatcher: alert vs main push copy, and repeating occurrence spawn."""
 from datetime import datetime, timezone
 from unittest.mock import patch
+from bson import ObjectId
 
 from app.core.config import settings
 from app.core.scheduling import next_occurrence_on_or_after
@@ -60,6 +61,32 @@ class TestReminderDispatchSeries:
         assert upcoming[0]["date"] == future(1)
         assert upcoming[0]["title"] == "Walk"
         assert upcoming[0]["id"] != reminder["id"]
+
+    def test_main_fire_moves_to_recent_before_clock_passes(self, client, mock_db):
+        """A fired repeating row belongs in Recent even if its time is later today."""
+        pet = make_pet(client, HEADERS_A)
+        reminder = create_reminder(
+            client,
+            mock_db,
+            pet["id"],
+            today(),
+            time="23:59",
+            repeat="every_day",
+            title="Walk",
+        )
+        mock_db.reminders._col.update_one(
+            {"_id": ObjectId(reminder["id"])},
+            {"$set": {"notified_at": datetime.now(timezone.utc), "next_spawned": True}},
+        )
+
+        today_items = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=today", headers=HEADERS_A
+        ).json()
+        recent = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
+        ).json()
+        assert all(item["id"] != reminder["id"] for item in today_items)
+        assert any(item["id"] == reminder["id"] for item in recent)
 
     def test_dispatch_does_not_duplicate_next_occurrence(self, client, mock_db):
         pet = make_pet(client, HEADERS_A)
@@ -199,7 +226,7 @@ class TestReminderDispatchSeries:
 
         by_kind = {msg["data"]["kind"]: msg for msg in captured}
         assert by_kind["alert"]["title"] == "Alert"
-        assert by_kind["alert"]["body"] == "Give pills"
+        assert by_kind["alert"]["body"] == "Alert"
         assert by_kind["main"]["title"] == "Reminder"
         assert by_kind["main"]["body"] == "Give pills"
         assert by_kind["alert"]["collapseId"] != by_kind["main"]["collapseId"]

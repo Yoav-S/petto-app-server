@@ -112,6 +112,40 @@ class TestReminderStatusComputation:
         assert r.status_code == 200
         assert r.json()["status"] == "missed"
 
+    def test_status_patch_is_idempotent(self, client, mock_db):
+        """A leftover Done/Missed must not remake the same occurrence."""
+        pet = make_pet(client, HEADERS_A)
+        reminder = create_reminder(
+            client,
+            mock_db,
+            pet["id"],
+            today(),
+            time="23:59",
+            repeat="every_day",
+        )
+        client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
+            json={"status": "completed"},
+            headers=HEADERS_A,
+        )
+        second = client.patch(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/status",
+            json={"status": "missed"},
+            headers=HEADERS_A,
+        )
+        assert second.status_code == 200
+        assert second.json()["status"] == "completed"
+        assert second.json()["date"] == today()
+
+        recent = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
+        ).json()
+        upcoming = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=upcoming", headers=HEADERS_A
+        ).json()
+        assert sum(1 for item in recent if item["id"] == reminder["id"]) == 1
+        assert len(upcoming) == 1
+
     def test_recurring_done_keeps_occurrence_and_spawns_next(self, client, mock_db):
         """Done on a repeating row stays in Recent; next date is a new item."""
         pet = make_pet(client, HEADERS_A)
