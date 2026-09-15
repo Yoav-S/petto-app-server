@@ -172,7 +172,7 @@ def compute_reminder_status(
         if (
             reminder_time_str
             and now_hm
-            and reminder_time_str[:5] < now_hm[:5]
+            and reminder_time_str[:5] <= now_hm[:5]
         ):
             return "missed"
         return "today"
@@ -245,7 +245,8 @@ def build_reminder_tab_query(
             "needs_ack": {"$ne": True},
         }
         if hm:
-            query["time"] = {"$gte": hm}
+            # Strictly after now — the fire minute belongs in Recent.
+            query["time"] = {"$gt": hm}
         return query
 
     if tab == "upcoming":
@@ -261,7 +262,7 @@ def build_reminder_tab_query(
     # repeating rows that still need Done/Missed.
     overdue_today: dict = {"date": today_str, "status": "scheduled"}
     if hm:
-        overdue_today["time"] = {"$lt": hm}
+        overdue_today["time"] = {"$lte": hm}
     return {
         **base,
         "$or": [

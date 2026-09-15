@@ -431,6 +431,23 @@ class TestReminderTabFiltering:
         assert len(recent_items) == 1
         assert recent_items[0]["status"] == "missed"
 
+    def test_today_fire_minute_belongs_in_recent(self, client, mock_db):
+        """At the reminder's minute it leaves Today and is the Recent row."""
+        pet = make_pet(client, HEADERS_A)
+        tz = resolve_timezone(None)
+        now = datetime.now(tz)
+        hm = f"{now.hour:02d}:{now.minute:02d}"
+        reminder = create_reminder(client, mock_db, pet["id"], today(), time=hm)
+
+        today_items = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=today", headers=HEADERS_A
+        ).json()
+        recent_items = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
+        ).json()
+        assert all(item["id"] != reminder["id"] for item in today_items)
+        assert any(item["id"] == reminder["id"] for item in recent_items)
+
     def test_today_tab_excludes_completed_reminders(self, client, mock_db):
         """A completed reminder for today must NOT appear in today tab."""
         pet = make_pet(client, HEADERS_A)
