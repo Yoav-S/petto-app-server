@@ -211,3 +211,37 @@ async def spawn_following_occurrences(
     await prune_extra_future_heads(db, series_id, today_str, keep_id=keep_future)
     await _mark_spawned(db, reminder, series_id)
     return created
+
+
+async def mark_occurrence_fired(
+    db,
+    reminder: dict,
+    tz_name: str | None,
+    now: datetime | None = None,
+) -> dict:
+    """Pin this occurrence in Recent and spawn the next repeating date."""
+    if reminder.get("status") in ("completed", "missed"):
+        return reminder
+    now_utc = now or datetime.now(timezone.utc)
+    if reminder.get("notified_at") and reminder.get("needs_ack") is True:
+        if reminder.get("next_spawned") is not True:
+            await spawn_following_occurrences(db, reminder, tz_name, now_utc)
+        return reminder
+    occurrence_date = reminder.get("date")
+    await spawn_following_occurrences(db, reminder, tz_name, now_utc)
+    await db.reminders.update_one(
+        {"_id": reminder["_id"]},
+        {
+            "$set": {
+                "notified_at": now_utc,
+                "needs_ack": True,
+                "next_spawned": True,
+                "date": occurrence_date,
+            }
+        },
+    )
+    reminder["notified_at"] = now_utc
+    reminder["needs_ack"] = True
+    reminder["next_spawned"] = True
+    reminder["date"] = occurrence_date
+    return reminder

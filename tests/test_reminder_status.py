@@ -448,6 +448,26 @@ class TestReminderTabFiltering:
         assert all(item["id"] != reminder["id"] for item in today_items)
         assert any(item["id"] == reminder["id"] for item in recent_items)
 
+    def test_post_fired_moves_row_to_recent(self, client, mock_db):
+        """Opening the app after fire time pins the occurrence in Recent."""
+        pet = make_pet(client, HEADERS_A)
+        reminder = create_reminder(client, mock_db, pet["id"], today(), time="23:59")
+        r = client.post(
+            f"/api/v1/pets/{pet['id']}/reminders/{reminder['id']}/fired",
+            headers=HEADERS_A,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["awaiting_ack"] is True
+
+        today_items = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=today", headers=HEADERS_A
+        ).json()
+        recent = client.get(
+            f"/api/v1/pets/{pet['id']}/reminders?tab=recent", headers=HEADERS_A
+        ).json()
+        assert all(item["id"] != reminder["id"] for item in today_items)
+        assert any(item["id"] == reminder["id"] for item in recent)
+
     def test_today_tab_excludes_completed_reminders(self, client, mock_db):
         """A completed reminder for today must NOT appear in today tab."""
         pet = make_pet(client, HEADERS_A)

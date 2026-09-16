@@ -26,7 +26,7 @@ from app.core.scheduling import (
     compute_scheduled_at,
     is_alert_possible,
 )
-from app.core.reminder_series import spawn_following_occurrences
+from app.core.reminder_series import spawn_following_occurrences, mark_occurrence_fired
 from app.core.subscription import can_add_active_reminder
 from app.core.utils import (
     doc_to_dict,
@@ -395,6 +395,30 @@ async def update_reminder(
     updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
     today_str, now_hm = await _user_local_clock(current_user["uid"], db)
     return _enrich(updated, today_str, now_hm=now_hm)
+
+
+# ---------------------------------------------------------------------------
+# Client clock / open-app: this occurrence has fired → Recent
+# ---------------------------------------------------------------------------
+
+@router.post("/{reminder_id}/fired", response_model=ReminderOut)
+async def mark_reminder_fired(
+    pet_id: str,
+    reminder_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Pin this occurrence in Recent (needs Done/Missed) and spawn the next date."""
+    await validate_pet_ownership(pet_id, current_user["uid"], db)
+    reminder = await validate_entity_ownership("reminders", reminder_id, pet_id, db)
+    uid = current_user["uid"]
+    today_str, now_hm = await _user_local_clock(uid, db)
+    if reminder.get("status") in ("completed", "missed"):
+        return _enrich(reminder, today_str, now_hm=now_hm)
+    tz_name = await _user_timezone_name(uid, db)
+    await mark_occurrence_fired(db, reminder, tz_name, datetime.now(timezone.utc))
+    updated = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
+    return _enrich(updated or reminder, today_str, now_hm=now_hm)
 
 
 # ---------------------------------------------------------------------------
