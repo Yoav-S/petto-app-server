@@ -247,3 +247,68 @@ class TestReminderDispatchSeries:
         assert by_kind["main"]["title"] == "Reminder"
         assert by_kind["main"]["body"] == "Give pills"
         assert by_kind["alert"]["collapseId"] != by_kind["main"]["collapseId"]
+
+
+class TestReminderSeriesIndexPrep:
+    def test_backfill_gives_null_series_distinct_ids(self, mock_db):
+        import asyncio
+        from bson import ObjectId
+        from app.core.reminder_series import backfill_missing_series_ids
+
+        async def run():
+            await mock_db.reminders.insert_one(
+                {"_id": ObjectId(), "date": "2026-09-16", "series_id": None}
+            )
+            await mock_db.reminders.insert_one(
+                {"_id": ObjectId(), "date": "2026-09-16"}
+            )
+            filled = await backfill_missing_series_ids(mock_db)
+            rows = await mock_db.reminders.find({}).to_list(None)
+            sids = [row["series_id"] for row in rows]
+            assert filled == 2
+            assert len(set(sids)) == 2
+            assert all(sid == str(row["_id"]) for sid, row in zip(sids, rows))
+
+        asyncio.run(run())
+
+    def test_split_same_series_same_date(self, mock_db):
+        import asyncio
+        from bson import ObjectId
+        from app.core.reminder_series import split_duplicate_series_dates
+
+        async def run():
+            sid = str(ObjectId())
+            first = ObjectId()
+            second = ObjectId()
+            await mock_db.reminders.insert_one(
+                {"_id": first, "date": "2026-09-16", "series_id": sid}
+            )
+            await mock_db.reminders.insert_one(
+                {"_id": second, "date": "2026-09-16", "series_id": sid}
+            )
+            split = await split_duplicate_series_dates(mock_db)
+            rows = {
+                str(row["_id"]): row["series_id"]
+                for row in await mock_db.reminders.find({}).to_list(None)
+            }
+            assert split == 1
+            assert len(set(rows.values())) == 2
+            assert rows[str(first)] == sid or rows[str(second)] == sid
+
+        asyncio.run(run())
+
+    def test_ensure_index_does_not_raise_on_null_series(self, mock_db):
+        import asyncio
+        from bson import ObjectId
+        from app.core.database import _ensure_reminder_series_date_index
+
+        async def run():
+            await mock_db.reminders.insert_one(
+                {"_id": ObjectId(), "date": "2026-09-16", "series_id": None}
+            )
+            await mock_db.reminders.insert_one(
+                {"_id": ObjectId(), "date": "2026-09-16", "series_id": None}
+            )
+            await _ensure_reminder_series_date_index(mock_db)
+
+        asyncio.run(run())

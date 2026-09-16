@@ -104,6 +104,9 @@ class AsyncCollection:
     async def create_index(self, *args, **kwargs):
         return self._col.create_index(*args, **kwargs)
 
+    async def drop_index(self, *args, **kwargs):
+        return self._col.drop_index(*args, **kwargs)
+
     async def count_documents(self, *args, **kwargs):
         return self._col.count_documents(*args, **kwargs)
 

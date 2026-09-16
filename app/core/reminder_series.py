@@ -53,6 +53,15 @@ def _occurrence_template(source: dict, date_str: str, series_id: str, now: datet
     return doc
 
 
+_MISSING_SERIES_ID = {
+    "$or": [
+        {"series_id": {"$exists": False}},
+        {"series_id": None},
+        {"series_id": ""},
+    ]
+}
+
+
 async def ensure_series_id(db, reminder: dict) -> str:
     """Persist series_id on older rows that predate occurrence documents."""
     existing = reminder.get("series_id")
@@ -62,6 +71,47 @@ async def ensure_series_id(db, reminder: dict) -> str:
     await db.reminders.update_one({"_id": reminder["_id"]}, {"$set": {"series_id": sid}})
     reminder["series_id"] = sid
     return sid
+
+
+async def backfill_missing_series_ids(db) -> int:
+    """Give each reminder without series_id its own id so unique indexes can build.
+
+    Mongo unique indexes treat missing/null series_id as the same key. Two
+    independent reminders on the same date then crash Cloud Run at startup.
+    """
+    filled = 0
+    cursor = db.reminders.find(_MISSING_SERIES_ID, {"_id": 1})
+    async for doc in cursor:
+        await db.reminders.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {"series_id": str(doc["_id"])}},
+        )
+        filled += 1
+    return filled
+
+
+async def split_duplicate_series_dates(db) -> int:
+    """Keep one row per (series_id, date); extras become their own series."""
+    pipeline = [
+        {"$match": {"series_id": {"$type": "string"}}},
+        {
+            "$group": {
+                "_id": {"series_id": "$series_id", "date": "$date"},
+                "ids": {"$push": "$_id"},
+                "n": {"$sum": 1},
+            }
+        },
+        {"$match": {"n": {"$gt": 1}}},
+    ]
+    split = 0
+    async for grp in db.reminders.aggregate(pipeline):
+        for oid in grp["ids"][1:]:
+            await db.reminders.update_one(
+                {"_id": oid},
+                {"$set": {"series_id": str(oid)}},
+            )
+            split += 1
+    return split
 
 
 async def prune_extra_future_heads(

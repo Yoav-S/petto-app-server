@@ -5,8 +5,17 @@ Uses Motor (async) with a single shared client.
 Indexes are created on startup to enforce query performance
 on the most common lookup paths: user_id, pet_id, date.
 """
+import logging
+
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
 from app.core.config import settings
+from app.core.reminder_series import (
+    backfill_missing_series_ids,
+    split_duplicate_series_dates,
+)
+
+logger = logging.getLogger("petto")
 
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
@@ -42,16 +51,38 @@ async def connect_to_db() -> None:
     await _db.reminders.create_index([("pet_id", 1), ("status", 1)])
     # reminders — dispatcher scan for un-notified scheduled reminders
     await _db.reminders.create_index([("status", 1), ("notified_at", 1)])
-    # One document per calendar day in a repeating series
-    await _db.reminders.create_index(
-        [("series_id", 1), ("date", 1)],
-        unique=True,
-        sparse=True,
-    )
+    await _ensure_reminder_series_date_index(_db)
 
     # push_tokens — one document per device token, look up by user
     await _db.push_tokens.create_index("token", unique=True)
     await _db.push_tokens.create_index("user_id")
+
+
+async def _ensure_reminder_series_date_index(db) -> None:
+    """Unique (series_id, date) without crashing on legacy null series_id."""
+    filled = await backfill_missing_series_ids(db)
+    split = await split_duplicate_series_dates(db)
+    if filled or split:
+        logger.info(
+            "Reminder series index prep: backfilled=%s split_collisions=%s",
+            filled,
+            split,
+        )
+    try:
+        await db.reminders.drop_index("series_id_1_date_1")
+    except Exception:
+        pass
+    try:
+        await db.reminders.create_index(
+            [("series_id", 1), ("date", 1)],
+            unique=True,
+            name="series_id_1_date_1",
+            partialFilterExpression={"series_id": {"$type": "string"}},
+        )
+    except Exception:
+        logger.exception(
+            "Could not create unique series_id+date index; continuing startup"
+        )
 
 
 async def close_db_connection() -> None:
