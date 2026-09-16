@@ -61,7 +61,7 @@ def _reminder_push_message(
         "title": title,
         "body": body,
         "sound": "default",
-        "channelId": "default",
+        "channelId": "alerts" if kind == "alert" else "reminders",
         "priority": "high",
         "collapseId": f"{reminder_id}:{kind}",
         "data": {
