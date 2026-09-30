@@ -20,6 +20,7 @@ from app.core.errors import ErrorCode, raise_api_error
 from app.core.utils import doc_to_dict
 from app.middleware.auth import get_current_user
 from app.models.business import (
+    AdminPublish,
     BusinessOut,
     BusinessReject,
     BusinessSession,
@@ -123,7 +124,34 @@ async def my_business(
 ):
     """Session for the website: admin flag, and this user's listing if any."""
     uid = current_user["uid"]
+    email = (current_user.get("email") or "").strip().lower()
     doc = await db.businesses.find_one({"owner_uid": uid})
+    if doc is None and email:
+        waiting = await db.businesses.find_one(
+            {"owner_email": email, "owner_uid": {"$exists": False}}
+        )
+        if waiting:
+            now = datetime.now(timezone.utc)
+            await db.businesses.update_one(
+                {"_id": waiting["_id"]},
+                {"$set": {"owner_uid": uid, "updated_at": now}},
+            )
+            await db.business_members.update_one(
+                {"business_id": str(waiting["_id"]), "user_id": uid},
+                {
+                    "$set": {
+                        "business_id": str(waiting["_id"]),
+                        "user_id": uid,
+                        "email": email,
+                        "role": "owner",
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+            waiting["owner_uid"] = uid
+            doc = waiting
     return BusinessSession(
         is_ragly_admin=settings.is_ragly_admin(current_user.get("email")),
         business=_to_out(doc) if doc else None,
@@ -170,6 +198,57 @@ async def submit_business(
 
     _notify_admins(fields, owner_email)
     return _to_out(doc)
+
+
+@router.post("/admin/businesses", response_model=BusinessOut, status_code=201)
+async def publish_for_owner(
+    body: AdminPublish,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Publish a listing for an owner who asked by phone. No review email."""
+    admin_email = _require_admin(current_user)
+    fields = _public_fields(body)
+    owner_email = body.owner_email.strip().lower()
+    user = await db.users.find_one({"email": owner_email})
+    owner_uid = user.get("firebase_uid") if user else None
+    taken = await db.businesses.find_one({"owner_email": owner_email})
+    if taken or (
+        owner_uid and await db.businesses.find_one({"owner_uid": owner_uid})
+    ):
+        raise_api_error(400, ErrorCode.BUSINESS_NOT_PENDING)
+    now = datetime.now(timezone.utc)
+    payload = {
+        **fields,
+        "owner_email": owner_email,
+        "status": "published",
+        "rejection_reason": None,
+        "submitted_at": now,
+        "reviewed_at": now,
+        "reviewed_by": admin_email,
+        "created_at": now,
+        "updated_at": now,
+    }
+    if owner_uid:
+        payload["owner_uid"] = owner_uid
+    result = await db.businesses.insert_one(payload)
+    payload["_id"] = result.inserted_id
+    if owner_uid:
+        await db.business_members.update_one(
+            {"business_id": str(result.inserted_id), "user_id": owner_uid},
+            {
+                "$set": {
+                    "business_id": str(result.inserted_id),
+                    "user_id": owner_uid,
+                    "email": owner_email,
+                    "role": "owner",
+                    "updated_at": now,
+                },
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+    return _to_out(payload)
 
 
 @router.get("/admin/businesses", response_model=list[BusinessOut])

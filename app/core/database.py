@@ -57,7 +57,17 @@ async def connect_to_db() -> None:
     await _db.push_tokens.create_index("token", unique=True)
     await _db.push_tokens.create_index("user_id")
 
-    await _db.businesses.create_index("owner_uid", unique=True)
+    indexes = await _db.businesses.index_information()
+    owner_index = indexes.get("owner_uid_1")
+    if owner_index and "partialFilterExpression" not in owner_index:
+        await _db.businesses.drop_index("owner_uid_1")
+        owner_index = None
+    if owner_index is None:
+        await _db.businesses.create_index(
+            "owner_uid",
+            unique=True,
+            partialFilterExpression={"owner_uid": {"$type": "string"}},
+        )
     await _db.businesses.create_index("status")
     await _db.business_members.create_index(
         [("business_id", 1), ("user_id", 1)],

@@ -77,6 +77,25 @@ def test_incomplete_listing_is_rejected(client):
         assert response.status_code in (400, 422)
 
 
+def test_admin_can_publish_for_a_phone_request(client):
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        created = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(owner_email="clinic@example.com"),
+            headers=HEADERS_B,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["status"] == "published"
+        assert created.json()["owner_email"] == "clinic@example.com"
+
+        denied = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(owner_email="other@example.com"),
+            headers=HEADERS_A,
+        )
+        assert denied.status_code == 403
+
+
 def test_admin_reject_stores_reason(client):
     with patch("app.routers.businesses.send_business_review_email"):
         with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):

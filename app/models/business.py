@@ -65,9 +65,15 @@ class BusinessReject(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class AdminPublish(BusinessSubmit):
+    """A listing an admin publishes for an owner who asked by phone."""
+
+    owner_email: str = Field(min_length=3, max_length=320)
+
+
 class BusinessOut(BaseModel):
     id: str
-    owner_uid: str
+    owner_uid: Optional[str] = None
     owner_email: str
     name: str
     phones: list[str]
