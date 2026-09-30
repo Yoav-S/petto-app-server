@@ -140,6 +140,55 @@ def _send_via_smtp(to_email: str, subject: str, body: str) -> None:
         raise EmailDeliveryError("SMTP send failed") from exc
 
 
+def send_business_review_email(
+    to_email: str,
+    *,
+    business_name: str,
+    owner_email: str,
+    city: str,
+    category: str,
+    review_url: str,
+) -> None:
+    """Tell a Ragly admin that a business is waiting for review."""
+    subject = f"Ragly review: {business_name}"
+    text = (
+        f"{owner_email} submitted {business_name} for review.\n"
+        f"Category: {category}\n"
+        f"City: {city}\n\n"
+        f"Open the review panel: {review_url}\n"
+    )
+    html = (
+        "<div style=\"font-family:Arial,Helvetica,sans-serif;color:#1F2937;"
+        "line-height:1.5;max-width:520px\">"
+        "<p style=\"margin:0 0 8px;font-size:16px\"><strong>Ragly</strong></p>"
+        f"<p style=\"margin:0 0 12px\">{owner_email} submitted "
+        f"<strong>{business_name}</strong> for review.</p>"
+        f"<p style=\"margin:0 0 4px\">Category: {category}</p>"
+        f"<p style=\"margin:0 0 16px\">City: {city}</p>"
+        f"<p style=\"margin:0\"><a href=\"{review_url}\" "
+        "style=\"color:#004741\">Open the review panel</a></p>"
+        "</div>"
+    )
+    resend_key, resend_from, _source = resolve_resend_credentials()
+    if resend_key and resend_from:
+        _send_via_resend(to_email, subject, text, html, resend_key, resend_from)
+        logger.info("Business review email sent to %s", to_email)
+        return
+
+    from app.core.config import settings
+
+    if settings.smtp_configured:
+        _send_via_smtp(to_email, subject, text)
+        logger.info("Business review email sent via SMTP to %s", to_email)
+        return
+
+    logger.warning(
+        "Email not configured — business review for %s would go to %s",
+        business_name,
+        to_email,
+    )
+
+
 def send_otp_email(to_email: str, otp_code: str, locale: str | None = None) -> None:
     """Deliver a 6-digit OTP to the user's inbox (localized)."""
     subject, text, html = _otp_email_content(otp_code, locale)

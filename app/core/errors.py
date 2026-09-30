@@ -34,6 +34,8 @@ class ErrorCode(StrEnum):
     ALERT_NOT_POSSIBLE = "alert_not_possible"
     VACCINATION_DATE_IN_FUTURE = "vaccination_date_in_future"
     VACCINATION_VALID_UNTIL_BEFORE_DATE = "vaccination_valid_until_before_date"
+    BUSINESS_INCOMPLETE = "business_incomplete"
+    BUSINESS_NOT_PENDING = "business_not_pending"
 
 
 def raise_api_error(

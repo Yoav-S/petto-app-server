@@ -57,6 +57,13 @@ async def connect_to_db() -> None:
     await _db.push_tokens.create_index("token", unique=True)
     await _db.push_tokens.create_index("user_id")
 
+    await _db.businesses.create_index("owner_uid", unique=True)
+    await _db.businesses.create_index("status")
+    await _db.business_members.create_index(
+        [("business_id", 1), ("user_id", 1)],
+        unique=True,
+    )
+
 
 async def _ensure_reminder_series_date_index(db) -> None:
     """Unique (series_id, date) without crashing on legacy null series_id."""

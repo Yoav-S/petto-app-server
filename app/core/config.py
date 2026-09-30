@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     PORT: int = 8080
     CLIENT_APP_URL: str
-    
+
     # MongoDB
     MONGODB_URI: str
     MONGODB_DB_NAME: str = "petto"
@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # Set either empty to disable.
     PLAY_REVIEW_EMAIL: str = "play.review@ragly.cloud"
     PLAY_REVIEW_OTP: str = "482917"
+
+    # Comma-separated Ragly admin emails. These accounts see the review panel.
+    # Anyone not on this list gets the business dashboard.
+    RAGLY_ADMIN_EMAILS: str = ""
+    # Link included in the new-request email.
+    BUSINESS_APP_URL: str = "https://business.ragly.cloud"
     
     @property
     def is_development(self) -> bool:
@@ -69,6 +75,19 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.APP_ENV == "production"
+
+    @property
+    def ragly_admin_emails(self) -> set[str]:
+        return {
+            part.strip().lower()
+            for part in self.RAGLY_ADMIN_EMAILS.split(",")
+            if part.strip()
+        }
+
+    def is_ragly_admin(self, email: str | None) -> bool:
+        if not email:
+            return False
+        return email.strip().lower() in self.ragly_admin_emails
 
     @property
     def mongodb_db_name(self) -> str:
