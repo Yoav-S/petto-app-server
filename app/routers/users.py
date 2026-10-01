@@ -16,7 +16,7 @@ from app.core.database import get_database
 from app.core.firebase import delete_auth_user, delete_user_storage_files
 from app.core.utils import doc_to_dict
 from app.middleware.auth import get_current_user
-from app.models.user import UserOut
+from app.models.user import UserNameUpdate, UserOut
 from app.models.subscription import SubscriptionOut
 from app.core.subscription import normalize_subscription
 
@@ -41,11 +41,20 @@ def _subscription_out(doc: dict) -> SubscriptionOut:
     return SubscriptionOut(**normalize_subscription(doc.get("subscription")))
 
 
+def _account_name(doc: dict) -> str | None:
+    raw = doc.get("name")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    return text or None
+
+
 def _user_to_out(doc: dict, has_pets: bool = False) -> UserOut:
     data = doc_to_dict(doc)
     return UserOut(
         id=data["id"],
         email=data["email"],
+        name=_account_name(doc),
         auth_provider=data.get("auth_provider", "email"),
         email_verified=data.get("email_verified", False),
         created_at=data["created_at"],
@@ -134,6 +143,27 @@ async def upsert_user(
     result = await db.users.insert_one(doc)
     doc["_id"] = result.inserted_id
     return _user_to_out(doc, has_pets)
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_me(
+    body: UserNameUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Store the account holder name. Missing name keeps the user in that onboarding step."""
+    uid = current_user["uid"]
+    user = await db.users.find_one({"firebase_uid": uid})
+    if not user:
+        raise HTTPException(status_code=404, detail={"code": ErrorCode.NOT_FOUND.value})
+    now = datetime.now(timezone.utc)
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"name": body.name, "updated_at": now}},
+    )
+    user["name"] = body.name
+    has_pets = await _user_has_pets(uid, db)
+    return _user_to_out(user, has_pets)
 
 
 @router.get("/me", response_model=UserOut)

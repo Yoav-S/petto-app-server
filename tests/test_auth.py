@@ -207,3 +207,24 @@ def test_users_me_updates_last_login(client):
     r = client.post("/api/v1/users/me", headers={"Authorization": "Bearer token_user_a"})
     assert r.status_code == 200, r.text
     assert r.json()["last_login_at"] is not None
+
+
+def test_invalid_email_does_not_send_otp(client):
+    with patch("app.routers.auth.send_otp_email") as send_otp:
+        response = client.post("/api/v1/auth/send-otp", json={"email": "not-an-email"})
+        assert response.status_code == 422
+        send_otp.assert_not_called()
+
+
+def test_account_holder_name_is_stored(client):
+    headers = {"Authorization": "Bearer token_user_a"}
+    created = client.post("/api/v1/users/me", headers=headers)
+    assert created.status_code == 200, created.text
+    assert created.json()["name"] is None
+
+    saved = client.patch("/api/v1/users/me", json={"name": "  Yoav  "}, headers=headers)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["name"] == "Yoav"
+
+    blank = client.patch("/api/v1/users/me", json={"name": "   "}, headers=headers)
+    assert blank.status_code == 422
