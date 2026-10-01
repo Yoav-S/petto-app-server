@@ -189,6 +189,52 @@ def send_business_review_email(
     )
 
 
+def send_business_invite_email(
+    to_email: str,
+    *,
+    business_name: str,
+    role: str,
+    accept_url: str,
+) -> None:
+    """Ask someone to register and accept a business role."""
+    subject = f"Ragly: {business_name}"
+    text = (
+        f"You are invited to join {business_name} on Ragly as {role}.\n\n"
+        "Register or log in with this email address, then approve the request.\n"
+        f"{accept_url}\n"
+    )
+    html = (
+        "<div style=\"font-family:Arial,Helvetica,sans-serif;color:#1F2937;"
+        "line-height:1.5;max-width:520px\">"
+        "<p style=\"margin:0 0 8px;font-size:16px\"><strong>Ragly</strong></p>"
+        f"<p style=\"margin:0 0 12px\">You are invited to join "
+        f"<strong>{business_name}</strong> as {role}.</p>"
+        "<p style=\"margin:0 0 16px\">Register or log in with this email, "
+        "then approve the request.</p>"
+        f"<p style=\"margin:0\"><a href=\"{accept_url}\" "
+        "style=\"color:#004741\">Open Ragly</a></p>"
+        "</div>"
+    )
+    resend_key, resend_from, _source = resolve_resend_credentials()
+    if resend_key and resend_from:
+        _send_via_resend(to_email, subject, text, html, resend_key, resend_from)
+        logger.info("Business invite email sent to %s", to_email)
+        return
+
+    from app.core.config import settings
+
+    if settings.smtp_configured:
+        _send_via_smtp(to_email, subject, text)
+        logger.info("Business invite email sent via SMTP to %s", to_email)
+        return
+
+    logger.warning(
+        "Email not configured — invite for %s would go to %s",
+        business_name,
+        to_email,
+    )
+
+
 def send_otp_email(to_email: str, otp_code: str, locale: str | None = None) -> None:
     """Deliver a 6-digit OTP to the user's inbox (localized)."""
     subject, text, html = _otp_email_content(otp_code, locale)

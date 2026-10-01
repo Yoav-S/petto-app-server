@@ -85,6 +85,15 @@ class AdminPublish(BusinessSubmit):
     owner_email: str = Field(min_length=3, max_length=320)
 
 
+class InvitationOut(BaseModel):
+    id: str
+    business_id: str
+    business_name: str = ""
+    email: str
+    role: Literal["owner", "worker"]
+    status: Literal["pending", "approved", "declined"]
+
+
 class BusinessOut(BaseModel):
     id: str
     name: str
@@ -108,8 +117,20 @@ class BusinessOut(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
+    invitations: list[InvitationOut] = Field(default_factory=list)
+
+
+class OwnerInvite(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class TeamInvite(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    role: Literal["owner", "worker"]
 
 
 class BusinessSession(BaseModel):
     is_ragly_admin: bool
     business: Optional[BusinessOut] = None
+    role: Optional[Literal["owner", "worker"]] = None
+    invitations: list[InvitationOut] = Field(default_factory=list)

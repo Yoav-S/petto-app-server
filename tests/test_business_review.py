@@ -87,7 +87,9 @@ def test_admin_can_publish_for_a_phone_request(client):
         )
         assert created.status_code == 201, created.text
         assert created.json()["status"] == "published"
-        assert created.json()["owner_email"] == "clinic@example.com"
+        assert created.json()["owned"] is False
+        assert created.json()["invitations"][0]["email"] == "clinic@example.com"
+        assert created.json()["invitations"][0]["status"] == "pending"
 
         denied = client.post(
             "/api/v1/admin/businesses",
@@ -168,3 +170,84 @@ def test_manual_clinic_document_lists_and_updates(client, mock_db):
         assert updated.json()["email"] == "vetgor@example.com"
         assert updated.json()["owned"] is False
         assert updated.json()["status"] == "published"
+
+
+def test_owner_invite_is_membership_only_after_approval(client):
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        created = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(owner_email="uid_user_a@test.com"),
+            headers=HEADERS_B,
+        )
+        assert created.status_code == 201, created.text
+        business_id = created.json()["id"]
+        invitation_id = created.json()["invitations"][0]["id"]
+
+        waiting = client.get("/api/v1/businesses/mine", headers=HEADERS_A)
+        assert waiting.json()["business"] is None
+        assert waiting.json()["invitations"][0]["status"] == "pending"
+
+        denied = client.post(
+            f"/api/v1/businesses/invitations/{invitation_id}/approve",
+            headers=HEADERS_B,
+        )
+        assert denied.status_code == 403
+
+        approved = client.post(
+            f"/api/v1/businesses/invitations/{invitation_id}/approve",
+            headers=HEADERS_A,
+        )
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "approved"
+
+        mine = client.get("/api/v1/businesses/mine", headers=HEADERS_A)
+        assert mine.json()["role"] == "owner"
+        assert mine.json()["business"]["owned"] is True
+
+        queue = client.get("/api/v1/admin/businesses", headers=HEADERS_B)
+        listed = next(item for item in queue.json() if item["id"] == business_id)
+        assert listed["invitations"][0]["status"] == "approved"
+        assert listed["owned"] is True
+
+        worker = client.post(
+            f"/api/v1/businesses/{business_id}/invitations",
+            json={"email": "worker@example.com", "role": "worker"},
+            headers=HEADERS_A,
+        )
+        assert worker.status_code == 201, worker.text
+        assert worker.json()["status"] == "pending"
+
+        removed = client.delete(f"/api/v1/businesses/{business_id}", headers=HEADERS_A)
+        assert removed.status_code == 204
+        gone = client.get("/api/v1/admin/businesses", headers=HEADERS_B)
+        assert all(item["id"] != business_id for item in gone.json())
+
+
+def test_worker_cannot_delete_business(client, mock_db):
+    import asyncio
+
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        created = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(owner_email="uid_user_a@test.com"),
+            headers=HEADERS_B,
+        )
+        business_id = created.json()["id"]
+        invitation_id = created.json()["invitations"][0]["id"]
+        client.post(
+            f"/api/v1/businesses/invitations/{invitation_id}/approve",
+            headers=HEADERS_A,
+        )
+        asyncio.run(
+            mock_db.business_members.update_one(
+                {"business_id": business_id, "user_id": "uid_user_a"},
+                {"$set": {"role": "worker"}},
+            )
+        )
+        denied = client.delete(f"/api/v1/businesses/{business_id}", headers=HEADERS_A)
+        assert denied.status_code == 403
+        removed = client.delete(
+            f"/api/v1/admin/businesses/{business_id}",
+            headers=HEADERS_B,
+        )
+        assert removed.status_code == 204
