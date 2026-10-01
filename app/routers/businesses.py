@@ -66,22 +66,31 @@ def _validate_hours(hours: OpeningHours) -> dict:
     return stored
 
 
+def _clean_photo(value: str | None) -> str | None:
+    photo = _clean_optional(value)
+    if not photo:
+        return None
+    if "://" in photo:
+        if not photo.startswith("https://"):
+            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+        return photo
+    if "/" in photo or "\\" in photo or ".." in photo:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    return photo
+
+
 def _public_fields(body: BusinessSubmit) -> dict:
     try:
         ZoneInfo(body.timezone.strip())
     except ZoneInfoNotFoundError:
         raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    if not (-90 <= body.latitude <= 90 and -180 <= body.longitude <= 180):
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
     website = _clean_optional(body.website)
     if website and not website.startswith(("http://", "https://")):
         raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    photo = _clean_optional(body.photo_url)
-    if photo and not photo.startswith("https://"):
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    longitude, latitude = body.location.coordinates
     return {
         "name": body.name.strip(),
-        "phones": body.phones,
+        "phone": body.phone,
         "email": _clean_optional(body.email),
         "description": _clean_optional(body.description),
         "category": body.category,
@@ -90,15 +99,85 @@ def _public_fields(body: BusinessSubmit) -> dict:
         "timezone": body.timezone.strip(),
         "opening_hours": _validate_hours(body.opening_hours),
         "website": website,
-        "latitude": body.latitude,
-        "longitude": body.longitude,
-        "photo_url": photo,
+        "location": {"type": "Point", "coordinates": [longitude, latitude]},
+        "photo": _clean_photo(body.photo),
         "instagram": _clean_optional(body.instagram),
     }
 
 
+def _phone_list(doc: dict) -> list[str]:
+    raw = doc.get("phone", doc.get("phones"))
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
+
+
+def _location(doc: dict) -> dict | None:
+    location = doc.get("location")
+    if isinstance(location, dict) and isinstance(location.get("coordinates"), list):
+        coords = location["coordinates"]
+        if len(coords) == 2:
+            try:
+                return {"type": "Point", "coordinates": [float(coords[0]), float(coords[1])]}
+            except (TypeError, ValueError):
+                return None
+    latitude = doc.get("latitude")
+    longitude = doc.get("longitude")
+    if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+        return {"type": "Point", "coordinates": [float(longitude), float(latitude)]}
+    return None
+
+
+def _hours(doc: dict) -> dict:
+    raw = doc.get("opening_hours") if isinstance(doc.get("opening_hours"), dict) else {}
+    hours: dict = {"always_open": bool(raw.get("always_open", False))}
+    for day in _DAYS:
+        slots = []
+        for slot in raw.get(day) or []:
+            if isinstance(slot, dict) and slot.get("open") and slot.get("close"):
+                slots.append({"open": str(slot["open"]), "close": str(slot["close"])})
+        hours[day] = slots
+    return hours
+
+
+def _text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def _to_out(doc: dict) -> BusinessOut:
-    return BusinessOut(**doc_to_dict(doc))
+    data = doc_to_dict(doc)
+    owner_uid = _text(data.get("owner_uid"))
+    owner_email = _text(data.get("owner_email"))
+    photo = _text(data.get("photo")) or _text(data.get("photo_url"))
+    return BusinessOut(
+        id=data["id"],
+        name=_text(data.get("name")) or "",
+        phone=_phone_list(doc),
+        email=_text(data.get("email")),
+        description=_text(data.get("description")),
+        category=data.get("category"),
+        city=_text(data.get("city")) or "",
+        status=data.get("status"),
+        address=_text(data.get("address")) or "",
+        timezone=_text(data.get("timezone")) or "Europe/Chisinau",
+        opening_hours=_hours(doc),
+        website=_text(data.get("website")),
+        location=_location(doc),
+        photo=photo,
+        owner_uid=owner_uid,
+        owner_email=owner_email,
+        owned=bool(owner_uid),
+        instagram=_text(data.get("instagram")),
+        rejection_reason=_text(data.get("rejection_reason")),
+        created_at=data.get("created_at"),
+        updated_at=data.get("updated_at"),
+        submitted_at=data.get("submitted_at"),
+    )
 
 
 def _notify_admins(fields: dict, owner_email: str) -> None:
@@ -249,6 +328,38 @@ async def publish_for_owner(
             upsert=True,
         )
     return _to_out(payload)
+
+
+@router.patch("/admin/businesses/{business_id}", response_model=BusinessOut)
+async def update_business(
+    business_id: str,
+    body: BusinessSubmit,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Replace the public listing fields. Ownership and status stay as they are."""
+    _require_admin(current_user)
+    if not ObjectId.is_valid(business_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    doc = await db.businesses.find_one({"_id": ObjectId(business_id)})
+    if not doc:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    now = datetime.now(timezone.utc)
+    fields = _public_fields(body)
+    fields["updated_at"] = now
+    await db.businesses.update_one(
+        {"_id": doc["_id"]},
+        {
+            "$set": fields,
+            "$unset": {"phones": "", "latitude": "", "longitude": "", "photo_url": ""},
+        },
+    )
+    doc.update(fields)
+    doc.pop("phones", None)
+    doc.pop("latitude", None)
+    doc.pop("longitude", None)
+    doc.pop("photo_url", None)
+    return _to_out(doc)
 
 
 @router.get("/admin/businesses", response_model=list[BusinessOut])

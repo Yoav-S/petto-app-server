@@ -20,14 +20,13 @@ HOURS = {
 def _payload(**overrides):
     body = {
         "name": "VetAsist Clinica Veterinară",
-        "phones": ["+373 22 221 303", "(022) 78-03-02"],
+        "phone": ["+373 22 221 303", "(022) 78-03-02"],
         "category": "veterinarian",
         "city": "Chișinău",
         "address": "Vasile Lupu 59, Chisinau",
         "timezone": "Europe/Chisinau",
         "opening_hours": HOURS,
-        "latitude": 47.0217,
-        "longitude": 28.8004,
+        "location": {"type": "Point", "coordinates": [28.8004, 47.0217]},
         "website": "https://vetasist.com.md/",
     }
     body.update(overrides)
@@ -50,7 +49,9 @@ def test_owner_submit_and_admin_approve(client):
             queue = client.get("/api/v1/admin/businesses", headers=HEADERS_B)
             assert queue.status_code == 200
             business_id = queue.json()[0]["id"]
-            assert queue.json()[0]["phones"] == ["+373 22 221 303", "(022) 78-03-02"]
+            assert queue.json()[0]["phone"] == ["+373 22 221 303", "(022) 78-03-02"]
+            assert queue.json()[0]["location"]["coordinates"] == [28.8004, 47.0217]
+            assert queue.json()[0]["owned"] is True
 
             approved = client.post(
                 f"/api/v1/admin/businesses/{business_id}/approve",
@@ -71,7 +72,7 @@ def test_incomplete_listing_is_rejected(client):
     with patch.object(settings, "RAGLY_ADMIN_EMAILS", ""):
         response = client.post(
             "/api/v1/businesses",
-            json=_payload(phones=["  "], timezone="Not/AZone"),
+            json=_payload(phone=["  "], timezone="Not/AZone"),
             headers=HEADERS_A,
         )
         assert response.status_code in (400, 422)
@@ -111,3 +112,59 @@ def test_admin_reject_stores_reason(client):
             assert rejected.status_code == 200
             assert rejected.json()["status"] == "rejected"
             assert rejected.json()["rejection_reason"] == "Not a real clinic."
+
+
+def test_manual_clinic_document_lists_and_updates(client, mock_db):
+    import asyncio
+
+    from bson import ObjectId
+
+    doc_id = ObjectId()
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": doc_id,
+                "name": "Vetgor",
+                "phone": "+373 606 97 607",
+                "email": None,
+                "description": "Cabinet veterinar",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "address": "str. Columna 59, Chisinau",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {
+                    "mon": [],
+                    "tue": [{"open": "08:00", "close": "19:00"}],
+                    "wed": [{"open": "08:00", "close": "19:00"}],
+                    "thu": [{"open": "08:00", "close": "19:00"}],
+                    "fri": [{"open": "08:00", "close": "19:00"}],
+                    "sat": [{"open": "08:00", "close": "19:00"}],
+                    "sun": [{"open": "08:00", "close": "19:00"}],
+                },
+                "website": None,
+                "location": {"type": "Point", "coordinates": [28.845684, 47.0198926]},
+                "photo": "vetgor.png",
+            }
+        )
+    )
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        listed = client.get("/api/v1/admin/businesses", headers=HEADERS_B)
+        assert listed.status_code == 200, listed.text
+        row = listed.json()[0]
+        assert row["name"] == "Vetgor"
+        assert row["phone"] == ["+373 606 97 607"]
+        assert row["photo"] == "vetgor.png"
+        assert row["owned"] is False
+        assert row["location"]["coordinates"][1] == 47.0198926
+
+        updated = client.patch(
+            f"/api/v1/admin/businesses/{doc_id}",
+            json=_payload(name="Vetgor Updated", email="vetgor@example.com"),
+            headers=HEADERS_B,
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["name"] == "Vetgor Updated"
+        assert updated.json()["email"] == "vetgor@example.com"
+        assert updated.json()["owned"] is False
+        assert updated.json()["status"] == "published"

@@ -25,8 +25,23 @@ class TimeSlot(BaseModel):
     close: str
 
 
+class GeoLocation(BaseModel):
+    """GeoJSON point. coordinates are [longitude, latitude]."""
+
+    type: Literal["Point"] = "Point"
+    coordinates: list[float] = Field(min_length=2, max_length=2)
+
+    @field_validator("coordinates")
+    @classmethod
+    def coordinates_in_range(cls, value: list[float]) -> list[float]:
+        longitude, latitude = value
+        if not (-180 <= longitude <= 180 and -90 <= latitude <= 90):
+            raise ValueError("coordinates")
+        return [float(longitude), float(latitude)]
+
+
 class OpeningHours(BaseModel):
-    always_open: bool
+    always_open: bool = False
     mon: list[TimeSlot] = Field(default_factory=list)
     tue: list[TimeSlot] = Field(default_factory=list)
     wed: list[TimeSlot] = Field(default_factory=list)
@@ -38,7 +53,7 @@ class OpeningHours(BaseModel):
 
 class BusinessSubmit(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    phones: list[str] = Field(min_length=1)
+    phone: list[str] = Field(min_length=1)
     email: Optional[str] = None
     description: Optional[str] = None
     category: BusinessCategory
@@ -47,17 +62,16 @@ class BusinessSubmit(BaseModel):
     timezone: str = Field(min_length=1, max_length=64)
     opening_hours: OpeningHours
     website: Optional[str] = None
-    latitude: float
-    longitude: float
-    photo_url: Optional[str] = None
+    location: GeoLocation
+    photo: Optional[str] = None
     instagram: Optional[str] = None
 
-    @field_validator("phones")
+    @field_validator("phone")
     @classmethod
-    def phones_present(cls, value: list[str]) -> list[str]:
+    def phone_present(cls, value: list[str]) -> list[str]:
         cleaned = [phone.strip() for phone in value if phone and phone.strip()]
         if not cleaned:
-            raise ValueError("phones")
+            raise ValueError("phone")
         return cleaned
 
 
@@ -73,10 +87,8 @@ class AdminPublish(BusinessSubmit):
 
 class BusinessOut(BaseModel):
     id: str
-    owner_uid: Optional[str] = None
-    owner_email: str
     name: str
-    phones: list[str]
+    phone: list[str]
     email: Optional[str] = None
     description: Optional[str] = None
     category: BusinessCategory
@@ -86,13 +98,15 @@ class BusinessOut(BaseModel):
     timezone: str
     opening_hours: OpeningHours
     website: Optional[str] = None
-    latitude: float
-    longitude: float
-    photo_url: Optional[str] = None
+    location: Optional[GeoLocation] = None
+    photo: Optional[str] = None
+    owner_uid: Optional[str] = None
+    owner_email: Optional[str] = None
+    owned: bool = False
     instagram: Optional[str] = None
     rejection_reason: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
 
 
