@@ -75,8 +75,41 @@ class BusinessSubmit(BaseModel):
         return cleaned
 
 
+_REVIEW_FIELDS = frozenset(
+    {
+        "name",
+        "phone",
+        "email",
+        "description",
+        "category",
+        "city",
+        "address",
+        "timezone",
+        "hours",
+        "website",
+        "location",
+        "photo",
+        "instagram",
+    }
+)
+
+
 class BusinessReject(BaseModel):
-    reason: str = Field(min_length=1, max_length=500)
+    field_errors: dict[str, str]
+
+    @field_validator("field_errors")
+    @classmethod
+    def notes_present(cls, value: dict[str, str]) -> dict[str, str]:
+        cleaned: dict[str, str] = {}
+        for key, message in value.items():
+            if key not in _REVIEW_FIELDS:
+                continue
+            text = message.strip()
+            if text:
+                cleaned[key] = text[:500]
+        if not cleaned:
+            raise ValueError("field_errors")
+        return cleaned
 
 
 class AdminPublish(BusinessSubmit):
@@ -109,15 +142,21 @@ class BusinessOut(BaseModel):
     website: Optional[str] = None
     location: Optional[GeoLocation] = None
     photo: Optional[str] = None
+    photos: list[str] = Field(default_factory=list)
     owner_uid: Optional[str] = None
     owner_email: Optional[str] = None
     owned: bool = False
     instagram: Optional[str] = None
     rejection_reason: Optional[str] = None
+    field_errors: dict[str, str] = Field(default_factory=dict)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     invitations: list[InvitationOut] = Field(default_factory=list)
+
+
+class PhotoRemove(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
 
 
 class OwnerInvite(BaseModel):

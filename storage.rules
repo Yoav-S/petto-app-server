@@ -20,6 +20,13 @@ service firebase.storage {
                    && request.resource.contentType.matches('image/.*');
     }
 
+    // Business listing photos. The API uploads these with the Admin SDK
+    // to businesses/{businessId}/. Browsers only need to read them.
+    match /businesses/{businessId}/{fileName} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // Default deny for everything else
     match /{allPaths=**} {
       allow read, write: if false;

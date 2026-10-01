@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import base64
 import logging
+import uuid
+from urllib.parse import quote, unquote, urlparse
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
@@ -135,6 +137,80 @@ def verify_firebase_token(token: str) -> dict:
     Raises firebase_admin.auth.InvalidIdTokenError on failure.
     """
     return firebase_auth.verify_id_token(token)
+
+
+def upload_business_image(business_id: str, content: bytes, content_type: str) -> str:
+    """
+    Store a listing photo at businesses/{businessId}/{file}.
+
+    Returns a Firebase download URL. The Admin SDK writes this path; browser
+    uploads stay under users/{uid}/ and cannot land here.
+    """
+    from firebase_admin import storage
+
+    extensions = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    extension = extensions.get(content_type)
+    bucket_name = settings.firebase_storage_bucket
+    if not extension or not bucket_name or _app is None:
+        raise RuntimeError("Business image storage is not available")
+    token = uuid.uuid4().hex
+    name = f"businesses/{business_id}/{uuid.uuid4().hex}{extension}"
+    bucket = storage.bucket(bucket_name, app=_app)
+    blob = bucket.blob(name)
+    blob.metadata = {"firebaseStorageDownloadTokens": token}
+    blob.upload_from_string(content, content_type=content_type)
+    quoted = quote(name, safe="")
+    return (
+        f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{quoted}"
+        f"?alt=media&token={token}"
+    )
+
+
+def _business_object_name(business_id: str, url: str) -> str | None:
+    parsed = urlparse(url)
+    marker = "/o/"
+    if marker not in parsed.path:
+        return None
+    name = unquote(parsed.path.split(marker, 1)[1])
+    prefix = f"businesses/{business_id}/"
+    if not name.startswith(prefix) or name == prefix:
+        return None
+    return name
+
+
+def delete_business_image(business_id: str, url: str) -> None:
+    """Delete one listing photo. Ignores URLs that are not in this business folder."""
+    from firebase_admin import storage
+
+    name = _business_object_name(business_id, url)
+    bucket_name = settings.firebase_storage_bucket
+    if not name or not bucket_name or _app is None:
+        return
+    bucket = storage.bucket(bucket_name, app=_app)
+    bucket.blob(name).delete()
+
+
+def delete_business_images(business_id: str) -> None:
+    """Best-effort removal of every photo stored for a business."""
+    bucket_name = settings.firebase_storage_bucket
+    if not bucket_name or _app is None:
+        return
+    try:
+        from firebase_admin import storage
+
+        bucket = storage.bucket(bucket_name, app=_app)
+        for blob in bucket.list_blobs(prefix=f"businesses/{business_id}/"):
+            try:
+                blob.delete()
+            except Exception as exc:  # noqa: BLE001 — per-file best effort
+                logger.warning("Failed deleting storage blob %s: %s", blob.name, exc)
+    except Exception as exc:  # noqa: BLE001 — cleanup must not block business deletion
+        logger.error("Business image cleanup failed for %s: %s", business_id, exc)
 
 
 def delete_auth_user(uid: str) -> None:

@@ -11,13 +11,15 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.config import settings
 from app.core.database import get_database
+from app.core.firebase import delete_business_image, delete_business_images, upload_business_image
 from app.core.email_service import (
     EmailDeliveryError,
     send_business_invite_email,
+    send_business_owner_email,
     send_business_review_email,
 )
 from app.core.errors import ErrorCode, raise_api_error
@@ -32,6 +34,7 @@ from app.models.business import (
     InvitationOut,
     OpeningHours,
     OwnerInvite,
+    PhotoRemove,
     TeamInvite,
 )
 
@@ -41,6 +44,9 @@ router = APIRouter(tags=["businesses"])
 
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_MAX_PHOTOS = 6
+_MAX_PHOTO_BYTES = 5 * 1024 * 1024
+_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
 def _require_admin(current_user: dict) -> str:
@@ -153,6 +159,28 @@ def _hours(doc: dict) -> dict:
     return hours
 
 
+def _field_errors(doc: dict) -> dict[str, str]:
+    raw = doc.get("field_errors")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value.strip()
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, str) and value.strip()
+    }
+
+
+def _gallery(doc: dict) -> list[str]:
+    raw = doc.get("photos")
+    if not isinstance(raw, list):
+        return []
+    return [
+        item
+        for item in raw
+        if isinstance(item, str) and item.startswith("https://")
+    ][:_MAX_PHOTOS]
+
+
 def _text(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -165,6 +193,9 @@ def _to_out(doc: dict) -> BusinessOut:
     owner_uid = _text(data.get("owner_uid"))
     owner_email = _text(data.get("owner_email"))
     photo = _text(data.get("photo")) or _text(data.get("photo_url"))
+    photos = _gallery(doc)
+    if photo and photo.startswith("https://") and photo not in photos:
+        photos = [photo, *photos][:_MAX_PHOTOS]
     return BusinessOut(
         id=data["id"],
         name=_text(data.get("name")) or "",
@@ -180,11 +211,13 @@ def _to_out(doc: dict) -> BusinessOut:
         website=_text(data.get("website")),
         location=_location(doc),
         photo=photo,
+        photos=photos,
         owner_uid=owner_uid,
         owner_email=owner_email,
         owned=bool(owner_uid),
         instagram=_text(data.get("instagram")),
         rejection_reason=_text(data.get("rejection_reason")),
+        field_errors=_field_errors(doc),
         created_at=data.get("created_at"),
         updated_at=data.get("updated_at"),
         submitted_at=data.get("submitted_at"),
@@ -282,6 +315,95 @@ async def _delete_business(db: AsyncIOMotorDatabase, doc: dict) -> None:
     await db.businesses.delete_one({"_id": doc["_id"]})
     await db.business_members.delete_many({"business_id": business_id})
     await db.business_invitations.delete_many({"business_id": business_id})
+    delete_business_images(business_id)
+
+
+async def _with_team(db: AsyncIOMotorDatabase, business: BusinessOut) -> BusinessOut:
+    invitations = await _load_invitations(db, [business.id])
+    owner_ids = await _owner_business_ids(db, [business.id])
+    return _apply_team(business, invitations.get(business.id, []), owner_ids)
+
+
+async def _add_business_photo(
+    db: AsyncIOMotorDatabase,
+    business: dict,
+    file: UploadFile,
+) -> BusinessOut:
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    content = await file.read(_MAX_PHOTO_BYTES + 1)
+    if content_type not in _IMAGE_TYPES or not content or len(content) > _MAX_PHOTO_BYTES:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    photos = _gallery(business)
+    if len(photos) >= _MAX_PHOTOS:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    try:
+        url = upload_business_image(str(business["_id"]), content, content_type)
+    except Exception:
+        logger.exception("Business photo upload failed for %s", business.get("_id"))
+        raise_api_error(500, ErrorCode.FAILED_TO_SAVE)
+    photos.append(url)
+    now = datetime.now(timezone.utc)
+    await db.businesses.update_one(
+        {"_id": business["_id"]},
+        {"$set": {"photos": photos, "updated_at": now}},
+    )
+    business["photos"] = photos
+    business["updated_at"] = now
+    return await _with_team(db, _to_out(business))
+
+
+async def _remove_business_photo(
+    db: AsyncIOMotorDatabase,
+    business: dict,
+    url: str,
+) -> BusinessOut:
+    url = url.strip()
+    photos = _gallery(business)
+    photo = _text(business.get("photo")) or _text(business.get("photo_url"))
+    if url not in photos and photo != url:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    photos = [item for item in photos if item != url]
+    now = datetime.now(timezone.utc)
+    update: dict = {"photos": photos, "updated_at": now}
+    unset: dict = {}
+    if photo == url:
+        unset["photo"] = ""
+        business.pop("photo", None)
+    await db.businesses.update_one(
+        {"_id": business["_id"]},
+        {"$set": update, **({"$unset": unset} if unset else {})},
+    )
+    business["photos"] = photos
+    business["updated_at"] = now
+    try:
+        delete_business_image(str(business["_id"]), url)
+    except Exception:
+        logger.exception("Business photo delete failed for %s", business.get("_id"))
+    return await _with_team(db, _to_out(business))
+
+
+def _email_owner(
+    email: str | None,
+    *,
+    business_name: str,
+    subject: str,
+    intro: str,
+    lines: list[str] | None = None,
+) -> None:
+    if not email:
+        return
+    dashboard = settings.BUSINESS_APP_URL.strip().rstrip("/") + "/dashboard"
+    try:
+        send_business_owner_email(
+            email,
+            business_name=business_name,
+            subject=subject,
+            intro=intro,
+            lines=lines,
+            action_url=dashboard,
+        )
+    except EmailDeliveryError:
+        logger.exception("Owner email failed for %s", email)
 
 
 def _notify_admins(fields: dict, owner_email: str) -> None:
@@ -370,6 +492,7 @@ async def submit_business(
         "owner_email": owner_email,
         "status": "pending_review",
         "rejection_reason": None,
+        "field_errors": {},
         "submitted_at": now,
         "updated_at": now,
     }
@@ -384,6 +507,12 @@ async def submit_business(
         doc = payload
 
     _notify_admins(fields, owner_email)
+    _email_owner(
+        owner_email,
+        business_name=fields["name"],
+        subject=f"Ragly: {fields['name']} is waiting for review",
+        intro=f"We received {fields['name']}. It stays pending until a Ragly admin approves it.",
+    )
     return _to_out(doc)
 
 
@@ -599,6 +728,64 @@ async def admin_delete_business(
     await _delete_business(db, await _business_or_404(db, business_id))
 
 
+@router.post("/admin/businesses/{business_id}/photos", response_model=BusinessOut)
+async def admin_add_business_photo(
+    business_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Store a listing photo in Firebase and save its URL on the business."""
+    _require_admin(current_user)
+    business = await _business_or_404(db, business_id)
+    return await _add_business_photo(db, business, file)
+
+
+@router.delete("/admin/businesses/{business_id}/photos", response_model=BusinessOut)
+async def admin_remove_business_photo(
+    business_id: str,
+    body: PhotoRemove,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    _require_admin(current_user)
+    business = await _business_or_404(db, business_id)
+    return await _remove_business_photo(db, business, body.url)
+
+
+@router.post("/businesses/{business_id}/photos", response_model=BusinessOut)
+async def owner_add_business_photo(
+    business_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Owners can add listing photos. Workers cannot."""
+    business = await _business_or_404(db, business_id)
+    member = await db.business_members.find_one(
+        {"business_id": str(business["_id"]), "user_id": current_user["uid"]}
+    )
+    if not member or member.get("role") != "owner":
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+    return await _add_business_photo(db, business, file)
+
+
+@router.delete("/businesses/{business_id}/photos", response_model=BusinessOut)
+async def owner_remove_business_photo(
+    business_id: str,
+    body: PhotoRemove,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    business = await _business_or_404(db, business_id)
+    member = await db.business_members.find_one(
+        {"business_id": str(business["_id"]), "user_id": current_user["uid"]}
+    )
+    if not member or member.get("role") != "owner":
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+    return await _remove_business_photo(db, business, body.url)
+
+
 @router.delete("/businesses/{business_id}", status_code=204)
 async def owner_delete_business(
     business_id: str,
@@ -667,6 +854,7 @@ async def approve_business(
             "$set": {
                 "status": "published",
                 "rejection_reason": None,
+                "field_errors": {},
                 "reviewed_at": now,
                 "reviewed_by": admin_email,
                 "updated_at": now,
@@ -689,7 +877,14 @@ async def approve_business(
     )
     doc["status"] = "published"
     doc["rejection_reason"] = None
+    doc["field_errors"] = {}
     doc["updated_at"] = now
+    _email_owner(
+        doc.get("owner_email"),
+        business_name=doc.get("name") or "",
+        subject=f"Ragly: {doc.get('name') or 'Your business'} is published",
+        intro=f"{doc.get('name') or 'Your business'} is published. Pet owners can find it in the app.",
+    )
     return _to_out(doc)
 
 
@@ -700,7 +895,7 @@ async def reject_business(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Keep the listing off the app and store the reason for the owner."""
+    """Keep the listing off the app and store a note on each field the owner must fix."""
     admin_email = _require_admin(current_user)
     if not ObjectId.is_valid(business_id):
         raise_api_error(404, ErrorCode.NOT_FOUND)
@@ -710,13 +905,14 @@ async def reject_business(
     if doc.get("status") != "pending_review":
         raise_api_error(400, ErrorCode.BUSINESS_NOT_PENDING)
     now = datetime.now(timezone.utc)
-    reason = body.reason.strip()
+    summary = "\n".join(f"{key}: {message}" for key, message in body.field_errors.items())
     await db.businesses.update_one(
         {"_id": doc["_id"]},
         {
             "$set": {
                 "status": "rejected",
-                "rejection_reason": reason,
+                "rejection_reason": summary,
+                "field_errors": body.field_errors,
                 "reviewed_at": now,
                 "reviewed_by": admin_email,
                 "updated_at": now,
@@ -724,6 +920,14 @@ async def reject_business(
         },
     )
     doc["status"] = "rejected"
-    doc["rejection_reason"] = reason
+    doc["rejection_reason"] = summary
+    doc["field_errors"] = body.field_errors
     doc["updated_at"] = now
+    _email_owner(
+        doc.get("owner_email"),
+        business_name=doc.get("name") or "",
+        subject=f"Ragly: {doc.get('name') or 'Your business'} needs changes",
+        intro=f"{doc.get('name') or 'Your business'} was not published. Fix the fields below and send it again.",
+        lines=[f"{key}: {message}" for key, message in body.field_errors.items()],
+    )
     return _to_out(doc)

@@ -108,12 +108,12 @@ def test_admin_reject_stores_reason(client):
             business_id = created.json()["id"]
             rejected = client.post(
                 f"/api/v1/admin/businesses/{business_id}/reject",
-                json={"reason": "Not a real clinic."},
+                json={"field_errors": {"address": "This address is not in Chișinău."}},
                 headers=HEADERS_B,
             )
             assert rejected.status_code == 200
             assert rejected.json()["status"] == "rejected"
-            assert rejected.json()["rejection_reason"] == "Not a real clinic."
+            assert rejected.json()["field_errors"]["address"] == "This address is not in Chișinău."
 
 
 def test_manual_clinic_document_lists_and_updates(client, mock_db):
@@ -251,3 +251,63 @@ def test_worker_cannot_delete_business(client, mock_db):
             headers=HEADERS_B,
         )
         assert removed.status_code == 204
+
+
+def test_admin_and_owner_store_listing_photos(client):
+    image = ("clinic.png", b"\x89PNG\r\n\x1a\nfake", "image/png")
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        with patch(
+            "app.routers.businesses.upload_business_image",
+            side_effect=[
+                "https://firebasestorage.googleapis.com/v0/b/bucket/o/businesses%2F1%2Fa.png?alt=media&token=abc",
+                "https://firebasestorage.googleapis.com/v0/b/bucket/o/businesses%2F1%2Fb.png?alt=media&token=def",
+            ],
+        ) as upload:
+            with patch("app.routers.businesses.delete_business_image"):
+                created = client.post(
+                    "/api/v1/admin/businesses",
+                    json=_payload(owner_email="uid_user_a@test.com", photo="vetgor.png"),
+                    headers=HEADERS_B,
+                )
+                business_id = created.json()["id"]
+                added = client.post(
+                    f"/api/v1/admin/businesses/{business_id}/photos",
+                    files={"file": image},
+                    headers=HEADERS_B,
+                )
+                assert added.status_code == 200, added.text
+                assert added.json()["photo"] == "vetgor.png"
+                assert added.json()["photos"] == [
+                    "https://firebasestorage.googleapis.com/v0/b/bucket/o/businesses%2F1%2Fa.png?alt=media&token=abc"
+                ]
+                assert upload.call_args.args[2] == "image/png"
+
+                denied = client.post(
+                    f"/api/v1/businesses/{business_id}/photos",
+                    files={"file": image},
+                    headers=HEADERS_A,
+                )
+                assert denied.status_code == 403
+
+                invitation_id = created.json()["invitations"][0]["id"]
+                client.post(
+                    f"/api/v1/businesses/invitations/{invitation_id}/approve",
+                    headers=HEADERS_A,
+                )
+                owned = client.post(
+                    f"/api/v1/businesses/{business_id}/photos",
+                    files={"file": image},
+                    headers=HEADERS_A,
+                )
+                assert owned.status_code == 200, owned.text
+                assert len(owned.json()["photos"]) == 2
+
+                removed = client.request(
+                    "DELETE",
+                    f"/api/v1/admin/businesses/{business_id}/photos",
+                    json={"url": owned.json()["photos"][0]},
+                    headers=HEADERS_B,
+                )
+                assert removed.status_code == 200, removed.text
+                assert len(removed.json()["photos"]) == 1
+                assert removed.json()["photo"] == "vetgor.png"

@@ -235,6 +235,56 @@ def send_business_invite_email(
     )
 
 
+def send_business_owner_email(
+    to_email: str,
+    *,
+    business_name: str,
+    subject: str,
+    intro: str,
+    lines: list[str] | None = None,
+    action_url: str | None = None,
+) -> None:
+    """Tell the business owner that a request was received or its status changed."""
+    notes = lines or []
+    text = intro + "\n"
+    if notes:
+        text += "\n" + "\n".join(f"- {line}" for line in notes) + "\n"
+    if action_url:
+        text += f"\n{action_url}\n"
+    items = "".join(f"<li>{line}</li>" for line in notes)
+    notes_html = f"<ul style=\"margin:0 0 16px;padding-left:18px\">{items}</ul>" if items else ""
+    link_html = (
+        f"<p style=\"margin:0\"><a href=\"{action_url}\" style=\"color:#004741\">Open your dashboard</a></p>"
+        if action_url
+        else ""
+    )
+    html = (
+        "<div style=\"font-family:Arial,Helvetica,sans-serif;color:#1F2937;"
+        "line-height:1.5;max-width:520px\">"
+        "<p style=\"margin:0 0 8px;font-size:16px\"><strong>Ragly</strong></p>"
+        f"<p style=\"margin:0 0 12px\">{intro}</p>"
+        f"{notes_html}{link_html}</div>"
+    )
+    resend_key, resend_from, _source = resolve_resend_credentials()
+    if resend_key and resend_from:
+        _send_via_resend(to_email, subject, text, html, resend_key, resend_from)
+        logger.info("Business status email sent to %s", to_email)
+        return
+
+    from app.core.config import settings
+
+    if settings.smtp_configured:
+        _send_via_smtp(to_email, subject, text)
+        logger.info("Business status email sent via SMTP to %s", to_email)
+        return
+
+    logger.warning(
+        "Email not configured — status update for %s would go to %s",
+        business_name,
+        to_email,
+    )
+
+
 def send_otp_email(to_email: str, otp_code: str, locale: str | None = None) -> None:
     """Deliver a 6-digit OTP to the user's inbox (localized)."""
     subject, text, html = _otp_email_content(otp_code, locale)
