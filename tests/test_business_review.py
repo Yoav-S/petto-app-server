@@ -313,6 +313,88 @@ def test_admin_and_owner_store_listing_photos(client):
                 assert removed.json()["photo"] == "vetgor.png"
 
 
+def test_review_flow_emails_owner_and_counts(client, mock_db):
+    """Submit, notify admins, reject with field notes, then approve the resubmit."""
+    import asyncio
+
+    with patch("app.routers.businesses.send_business_review_email") as admins:
+        with patch("app.routers.businesses.send_business_owner_email") as owner_mail:
+            with patch.object(
+                settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com,second@example.com"
+            ):
+                created = client.post("/api/v1/businesses", json=_payload(), headers=HEADERS_A)
+                assert created.status_code == 201, created.text
+                business_id = created.json()["id"]
+                assert created.json()["status"] == "pending_review"
+                assert {call.args[0] for call in admins.call_args_list} == {
+                    "uid_user_b@test.com",
+                    "second@example.com",
+                }
+                assert owner_mail.call_args.kwargs["subject"].endswith("is waiting for review")
+
+                waiting = client.get("/api/v1/businesses/mine", headers=HEADERS_A)
+                assert waiting.json()["business"]["status"] == "pending_review"
+                assert waiting.json()["role"] is None
+                summary = client.get("/api/v1/admin/businesses/summary", headers=HEADERS_B)
+                assert summary.json()["pending"] == 1
+                assert summary.json()["published"] == 0
+                assert summary.json()["rejected"] == 0
+                members = asyncio.run(
+                    mock_db.business_members.find({"business_id": business_id}).to_list(None)
+                )
+                assert members == []
+
+                rejected = client.post(
+                    f"/api/v1/admin/businesses/{business_id}/reject",
+                    json={
+                        "field_errors": {
+                            "address": "This address is not in Chișinău.",
+                            "phone": "Add the city code.",
+                        }
+                    },
+                    headers=HEADERS_B,
+                )
+                assert rejected.status_code == 200, rejected.text
+                notes = [
+                    call.kwargs["lines"]
+                    for call in owner_mail.call_args_list
+                    if call.kwargs.get("lines")
+                ]
+                assert notes[-1] == [
+                    "address: This address is not in Chișinău.",
+                    "phone: Add the city code.",
+                ]
+                after_reject = client.get("/api/v1/admin/businesses/summary", headers=HEADERS_B)
+                assert after_reject.json()["pending"] == 0
+                assert after_reject.json()["rejected"] == 1
+
+                resubmitted = client.post("/api/v1/businesses", json=_payload(), headers=HEADERS_A)
+                assert resubmitted.status_code == 201, resubmitted.text
+                assert resubmitted.json()["status"] == "pending_review"
+                assert resubmitted.json()["field_errors"] == {}
+
+                approved = client.post(
+                    f"/api/v1/admin/businesses/{business_id}/approve",
+                    headers=HEADERS_B,
+                )
+                assert approved.status_code == 200, approved.text
+                assert approved.json()["status"] == "published"
+                published_mail = owner_mail.call_args.kwargs
+                assert "is published" in published_mail["subject"]
+                member = asyncio.run(
+                    mock_db.business_members.find_one(
+                        {"business_id": business_id, "user_id": "uid_user_a"}
+                    )
+                )
+                assert member["role"] == "owner"
+                mine = client.get("/api/v1/businesses/mine", headers=HEADERS_A)
+                assert mine.json()["role"] == "owner"
+                finished = client.get("/api/v1/admin/businesses/summary", headers=HEADERS_B)
+                assert finished.json()["pending"] == 0
+                assert finished.json()["published"] == 1
+                assert finished.json()["rejected"] == 0
+
+
 def test_summary_counts_and_pages(client):
     with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
         created = client.post(

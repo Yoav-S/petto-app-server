@@ -444,8 +444,6 @@ async def my_business(
         doc = await db.businesses.find_one({"_id": ObjectId(member["business_id"])})
     if doc is None:
         doc = await db.businesses.find_one({"owner_uid": uid})
-        if doc and role is None:
-            role = "owner"
     business = _to_out(doc) if doc else None
     if business:
         invitations = await _load_invitations(db, [business.id])
