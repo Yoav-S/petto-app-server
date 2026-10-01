@@ -168,6 +168,18 @@ class TeamInvite(BaseModel):
     role: Literal["owner", "worker"]
 
 
+class BusinessCounts(BaseModel):
+    pending: int = 0
+    published: int = 0
+    rejected: int = 0
+    deleted: int = 0
+
+
+class BusinessPage(BaseModel):
+    items: list[BusinessOut]
+    has_more: bool = False
+
+
 class BusinessSession(BaseModel):
     is_ragly_admin: bool
     business: Optional[BusinessOut] = None

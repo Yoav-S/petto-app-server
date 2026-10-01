@@ -61,6 +61,12 @@ class AsyncCursor:
     def sort(self, *args, **kwargs):
         return AsyncCursor(self._cursor.sort(*args, **kwargs))
 
+    def skip(self, count):
+        return AsyncCursor(self._cursor.skip(count))
+
+    def limit(self, count):
+        return AsyncCursor(self._cursor.limit(count))
+
     async def to_list(self, length=None):
         return list(self._cursor)
 

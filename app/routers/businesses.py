@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, File, UploadFile
+from typing import Literal
+
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.config import settings
 from app.core.database import get_database
@@ -27,7 +29,9 @@ from app.core.utils import doc_to_dict
 from app.middleware.auth import get_current_user
 from app.models.business import (
     AdminPublish,
+    BusinessCounts,
     BusinessOut,
+    BusinessPage,
     BusinessReject,
     BusinessSession,
     BusinessSubmit,
@@ -315,6 +319,9 @@ async def _delete_business(db: AsyncIOMotorDatabase, doc: dict) -> None:
     await db.businesses.delete_one({"_id": doc["_id"]})
     await db.business_members.delete_many({"business_id": business_id})
     await db.business_invitations.delete_many({"business_id": business_id})
+    await db.business_deletions.insert_one(
+        {"business_id": business_id, "deleted_at": datetime.now(timezone.utc)}
+    )
     delete_business_images(business_id)
 
 
@@ -579,6 +586,146 @@ async def update_business(
     return _to_out(doc)
 
 
+async def _decorate(db: AsyncIOMotorDatabase, docs: list[dict]) -> list[BusinessOut]:
+    businesses = [_to_out(doc) for doc in docs]
+    business_ids = [business.id for business in businesses]
+    invitations = await _load_invitations(db, business_ids)
+    owner_ids = await _owner_business_ids(db, business_ids)
+    return [
+        _apply_team(business, invitations.get(business.id, []), owner_ids)
+        for business in businesses
+    ]
+
+
+def _page_match(
+    status: str | None,
+    category: str | None,
+    q: str | None,
+    ownership: str,
+    owner_oids: list[ObjectId],
+) -> dict:
+    clauses: list[dict] = []
+    if status == "reviewed":
+        clauses.append({"status": {"$in": ["published", "rejected"]}})
+    elif status:
+        clauses.append({"status": status})
+    if category:
+        clauses.append({"category": category})
+    text = (q or "").strip()
+    if text:
+        pattern = re.escape(text)
+        clauses.append(
+            {
+                "$or": [
+                    {"name": {"$regex": pattern, "$options": "i"}},
+                    {"city": {"$regex": pattern, "$options": "i"}},
+                    {"address": {"$regex": pattern, "$options": "i"}},
+                ]
+            }
+        )
+    if ownership == "owned":
+        clauses.append(
+            {"$or": [{"owner_uid": {"$type": "string"}}, {"_id": {"$in": owner_oids}}]}
+        )
+    elif ownership == "unowned":
+        clauses.append({"owner_uid": {"$not": {"$type": "string"}}})
+        clauses.append({"_id": {"$nin": owner_oids}})
+    if not clauses:
+        return {}
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
+
+
+@router.get("/admin/businesses/summary", response_model=BusinessCounts)
+async def business_summary(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Counts for the admin dashboard. Deleted includes owner and admin removals."""
+    _require_admin(current_user)
+    counts = {"pending_review": 0, "published": 0, "rejected": 0}
+    rows = await db.businesses.aggregate(
+        [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
+    ).to_list(None)
+    for row in rows:
+        if row.get("_id") in counts:
+            counts[row["_id"]] = row["n"]
+    deleted = await db.business_deletions.count_documents({})
+    return BusinessCounts(
+        pending=counts["pending_review"],
+        published=counts["published"],
+        rejected=counts["rejected"],
+        deleted=deleted,
+    )
+
+
+@router.get("/admin/businesses/page", response_model=BusinessPage)
+async def page_businesses(
+    limit: int = Query(default=20, ge=1, le=50),
+    skip: int = Query(default=0, ge=0),
+    status: str | None = None,
+    category: str | None = None,
+    q: str | None = None,
+    ownership: Literal["all", "owned", "unowned"] = "all",
+    sort: Literal["category", "name", "city", "recent"] = "category",
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """One page of listings. The next page is requested as the list scrolls."""
+    _require_admin(current_user)
+    allowed_status = {"pending_review", "published", "rejected", "suspended", "reviewed"}
+    allowed_category = {"veterinarian", "groomer", "pharmacy", "pet_friendly", "pet_store"}
+    if status and status not in allowed_status:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    if category and category not in allowed_category:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    owner_oids: list[ObjectId] = []
+    if ownership != "all":
+        rows = await db.business_members.find({"role": "owner"}, {"business_id": 1}).to_list(None)
+        for row in rows:
+            business_id = str(row.get("business_id") or "")
+            if ObjectId.is_valid(business_id):
+                owner_oids.append(ObjectId(business_id))
+    match = _page_match(status, category, q, ownership, owner_oids)
+    if sort == "name":
+        sort_spec = [("name", 1), ("_id", 1)]
+    elif sort == "city":
+        sort_spec = [("city", 1), ("name", 1), ("_id", 1)]
+    elif sort == "recent":
+        sort_spec = [("updated_at", -1), ("_id", -1)]
+    else:
+        sort_spec = None
+    if sort_spec is None:
+        pipeline = [
+            *([{"$match": match}] if match else []),
+            {
+                "$addFields": {
+                    "_rank": {
+                        "$switch": {
+                            "branches": [
+                                {"case": {"$eq": ["$category", "veterinarian"]}, "then": 0},
+                                {"case": {"$eq": ["$category", "groomer"]}, "then": 1},
+                                {"case": {"$eq": ["$category", "pharmacy"]}, "then": 2},
+                                {"case": {"$eq": ["$category", "pet_friendly"]}, "then": 3},
+                                {"case": {"$eq": ["$category", "pet_store"]}, "then": 4},
+                            ],
+                            "default": 9,
+                        }
+                    }
+                }
+            },
+            {"$sort": {"_rank": 1, "name": 1, "_id": 1}},
+            {"$skip": skip},
+            {"$limit": limit + 1},
+        ]
+        docs = await db.businesses.aggregate(pipeline).to_list(None)
+    else:
+        docs = await db.businesses.find(match).sort(sort_spec).skip(skip).limit(limit + 1).to_list(None)
+    has_more = len(docs) > limit
+    return BusinessPage(items=await _decorate(db, docs[:limit]), has_more=has_more)
+
+
 @router.get("/admin/businesses", response_model=list[BusinessOut])
 async def list_businesses_for_review(
     current_user: dict = Depends(get_current_user),
@@ -589,14 +736,7 @@ async def list_businesses_for_review(
     docs = await db.businesses.find({}).sort("submitted_at", -1).to_list(None)
     order = {"pending_review": 0, "rejected": 1, "published": 2, "suspended": 3}
     docs.sort(key=lambda doc: (order.get(doc.get("status"), 9),))
-    businesses = [_to_out(doc) for doc in docs]
-    business_ids = [business.id for business in businesses]
-    invitations = await _load_invitations(db, business_ids)
-    owner_ids = await _owner_business_ids(db, business_ids)
-    return [
-        _apply_team(business, invitations.get(business.id, []), owner_ids)
-        for business in businesses
-    ]
+    return await _decorate(db, docs)
 
 
 async def _business_or_404(db: AsyncIOMotorDatabase, business_id: str) -> dict:

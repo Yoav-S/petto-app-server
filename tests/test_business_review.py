@@ -311,3 +311,35 @@ def test_admin_and_owner_store_listing_photos(client):
                 assert removed.status_code == 200, removed.text
                 assert len(removed.json()["photos"]) == 1
                 assert removed.json()["photo"] == "vetgor.png"
+
+
+def test_summary_counts_and_pages(client):
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        created = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(owner_email="uid_user_a@test.com"),
+            headers=HEADERS_B,
+        )
+        business_id = created.json()["id"]
+        summary = client.get("/api/v1/admin/businesses/summary", headers=HEADERS_B)
+        assert summary.status_code == 200, summary.text
+        assert summary.json()["published"] == 1
+        assert summary.json()["deleted"] == 0
+
+        page = client.get(
+            "/api/v1/admin/businesses/page?limit=1&status=published",
+            headers=HEADERS_B,
+        )
+        assert page.status_code == 200, page.text
+        assert len(page.json()["items"]) == 1
+        assert page.json()["items"][0]["id"] == business_id
+        assert page.json()["has_more"] is False
+
+        removed = client.delete(
+            f"/api/v1/admin/businesses/{business_id}",
+            headers=HEADERS_B,
+        )
+        assert removed.status_code == 204
+        after = client.get("/api/v1/admin/businesses/summary", headers=HEADERS_B)
+        assert after.json()["published"] == 0
+        assert after.json()["deleted"] == 1
