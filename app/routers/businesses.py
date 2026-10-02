@@ -331,6 +331,16 @@ async def _with_team(db: AsyncIOMotorDatabase, business: BusinessOut) -> Busines
     return _apply_team(business, invitations.get(business.id, []), owner_ids)
 
 
+async def _listing_owner(db: AsyncIOMotorDatabase, business: dict, uid: str) -> bool:
+    """The account that submitted the listing, or a member with the owner role."""
+    if business.get("owner_uid") == uid:
+        return True
+    member = await db.business_members.find_one(
+        {"business_id": str(business["_id"]), "user_id": uid}
+    )
+    return bool(member and member.get("role") == "owner")
+
+
 async def _add_business_photo(
     db: AsyncIOMotorDatabase,
     business: dict,
@@ -527,10 +537,10 @@ async def publish_for_owner(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Publish a listing for an owner who asked by phone. No review email."""
+    """Publish a listing. An owner email, when present, gets an invitation."""
     admin_email = _require_admin(current_user)
     fields = _public_fields(body)
-    owner_email = body.owner_email.strip().lower()
+    owner_email = (body.owner_email or "").strip().lower()
     now = datetime.now(timezone.utc)
     payload = {
         **fields,
@@ -544,9 +554,10 @@ async def publish_for_owner(
     }
     result = await db.businesses.insert_one(payload)
     payload["_id"] = result.inserted_id
-    invite = await _create_invitation(db, payload, owner_email, "owner", admin_email)
     business = _to_out(payload)
-    business.invitations = [_invite_out(invite, payload["name"])]
+    if owner_email:
+        invite = await _create_invitation(db, payload, owner_email, "owner", admin_email)
+        business.invitations = [_invite_out(invite, payload["name"])]
     return business
 
 
@@ -900,10 +911,7 @@ async def owner_add_business_photo(
 ):
     """Owners can add listing photos. Workers cannot."""
     business = await _business_or_404(db, business_id)
-    member = await db.business_members.find_one(
-        {"business_id": str(business["_id"]), "user_id": current_user["uid"]}
-    )
-    if not member or member.get("role") != "owner":
+    if not await _listing_owner(db, business, current_user["uid"]):
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
     return await _add_business_photo(db, business, file)
 
@@ -916,10 +924,7 @@ async def owner_remove_business_photo(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     business = await _business_or_404(db, business_id)
-    member = await db.business_members.find_one(
-        {"business_id": str(business["_id"]), "user_id": current_user["uid"]}
-    )
-    if not member or member.get("role") != "owner":
+    if not await _listing_owner(db, business, current_user["uid"]):
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
     return await _remove_business_photo(db, business, body.url)
 

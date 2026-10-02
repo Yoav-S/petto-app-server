@@ -98,6 +98,16 @@ def test_admin_can_publish_for_a_phone_request(client):
         )
         assert denied.status_code == 403
 
+        unowned = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(name="No Owner Clinic"),
+            headers=HEADERS_B,
+        )
+        assert unowned.status_code == 201, unowned.text
+        assert unowned.json()["status"] == "published"
+        assert unowned.json()["owned"] is False
+        assert unowned.json()["invitations"] == []
+
 
 def test_admin_reject_stores_reason(client):
     with patch("app.routers.businesses.send_business_review_email"):

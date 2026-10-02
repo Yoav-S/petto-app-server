@@ -113,9 +113,21 @@ class BusinessReject(BaseModel):
 
 
 class AdminPublish(BusinessSubmit):
-    """A listing an admin publishes for an owner who asked by phone."""
+    """A listing an admin publishes. An owner email is optional."""
 
-    owner_email: str = Field(min_length=3, max_length=320)
+    owner_email: Optional[str] = None
+
+    @field_validator("owner_email")
+    @classmethod
+    def owner_email_optional(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = value.strip().lower()
+        if not text:
+            return None
+        if "@" not in text or "." not in text.split("@")[-1]:
+            raise ValueError("owner_email")
+        return text
 
 
 class InvitationOut(BaseModel):
