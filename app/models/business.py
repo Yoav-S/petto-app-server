@@ -201,6 +201,17 @@ class BusinessPlace(BaseModel):
     city: str
     image: Optional[str] = None
     distance_km: Optional[float] = None
+    rating: Optional[float] = None
+    open_now: bool = False
+    closes_at: Optional[str] = None
+    opens_at: Optional[str] = None
+    next_open_day: Optional[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = None
+    opens_tomorrow: bool = False
+
+
+class BusinessPlacePage(BaseModel):
+    items: list[BusinessPlace]
+    has_more: bool = False
 
 
 class BusinessSession(BaseModel):

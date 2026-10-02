@@ -34,6 +34,7 @@ from app.models.business import (
     BusinessOut,
     BusinessPage,
     BusinessPlace,
+    BusinessPlacePage,
     BusinessReject,
     BusinessSession,
     BusinessSubmit,
@@ -505,26 +506,105 @@ def _place_image(doc: dict) -> str | None:
     return None
 
 
-@router.get("/businesses/nearby", response_model=list[BusinessPlace])
+def _clock(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _minutes(value: object) -> int | None:
+    if not isinstance(value, str) or not _TIME.match(value):
+        return None
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def _schedule(doc: dict) -> dict:
+    """Open or closed in the business timezone, plus the next change."""
+    closed = {
+        "open_now": False,
+        "closes_at": None,
+        "opens_at": None,
+        "next_open_day": None,
+        "opens_tomorrow": False,
+    }
+    hours = _hours(doc)
+    if hours["always_open"]:
+        return {**closed, "open_now": True}
+    tz_name = _text(doc.get("timezone")) or "Europe/Chisinau"
+    try:
+        zone = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        zone = ZoneInfo("Europe/Chisinau")
+    now = datetime.now(zone)
+    today = now.weekday()
+    now_min = now.hour * 60 + now.minute
+
+    def slots_for(index: int) -> list[tuple[int, int]]:
+        parsed: list[tuple[int, int]] = []
+        for slot in hours[_DAYS[index]]:
+            start = _minutes(slot.get("open"))
+            end = _minutes(slot.get("close"))
+            if start is None or end is None or end <= start:
+                continue
+            parsed.append((start, end))
+        return parsed
+
+    for start, end in slots_for(today):
+        if start <= now_min < end:
+            return {**closed, "open_now": True, "closes_at": _clock(end)}
+    later = [start for start, _end in slots_for(today) if start > now_min]
+    if later:
+        return {**closed, "opens_at": _clock(min(later))}
+    for offset in range(1, 8):
+        index = (today + offset) % 7
+        upcoming = slots_for(index)
+        if not upcoming:
+            continue
+        return {
+            **closed,
+            "opens_at": _clock(min(start for start, _end in upcoming)),
+            "next_open_day": _DAYS[index],
+            "opens_tomorrow": offset == 1,
+        }
+    return closed
+
+
+async def _ratings(db: AsyncIOMotorDatabase, business_ids: list[str]) -> dict[str, float]:
+    """Average star rating from business_reviews. Missing reviews stay unset."""
+    if not business_ids:
+        return {}
+    rows = await db.business_reviews.find({"business_id": {"$in": business_ids}}).to_list(None)
+    totals: dict[str, list[float]] = {}
+    for row in rows:
+        business_id = str(row.get("business_id") or "")
+        rating = row.get("rating")
+        if not business_id or not isinstance(rating, (int, float)):
+            continue
+        totals.setdefault(business_id, []).append(float(rating))
+    return {
+        business_id: round(sum(values) / len(values), 1)
+        for business_id, values in totals.items()
+        if values
+    }
+
+
+@router.get("/businesses/nearby", response_model=BusinessPlacePage)
 async def nearby_businesses(
     latitude: float | None = None,
     longitude: float | None = None,
-    limit: int = Query(default=20, ge=1, le=50),
+    limit: int = Query(default=15, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    anywhere: bool = Query(default=False),
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Published listings. With coordinates, the closest ones come first."""
+    """Published listings. Coordinates sort the closest first, unless anywhere is set."""
     del current_user
     docs = await db.businesses.find({"status": "published"}).to_list(500)
     places: list[BusinessPlace] = []
     for doc in docs:
         point = _location(doc)
         distance = None
-        if (
-            point
-            and latitude is not None
-            and longitude is not None
-        ):
+        if point and latitude is not None and longitude is not None:
             lng, lat = point["coordinates"]
             distance = round(_distance_km(latitude, longitude, lat, lng), 1)
         data = doc_to_dict(doc)
@@ -536,6 +616,7 @@ async def nearby_businesses(
             "pet_store",
         }:
             continue
+        schedule = _schedule(doc)
         places.append(
             BusinessPlace(
                 id=data["id"],
@@ -544,13 +625,21 @@ async def nearby_businesses(
                 city=_text(data.get("city")) or "",
                 image=_place_image(doc),
                 distance_km=distance,
+                **schedule,
             )
         )
-    if latitude is not None and longitude is not None:
+    ratings = await _ratings(db, [place.id for place in places])
+    if ratings:
+        places = [
+            place.model_copy(update={"rating": ratings.get(place.id)})
+            for place in places
+        ]
+    if not anywhere and latitude is not None and longitude is not None:
         places.sort(key=lambda place: (place.distance_km is None, place.distance_km or 0))
     else:
         places.sort(key=lambda place: place.name.lower())
-    return places[:limit]
+    page = places[offset:offset + limit]
+    return BusinessPlacePage(items=page, has_more=offset + limit < len(places))
 
 
 @router.post("/businesses", response_model=BusinessOut, status_code=201)

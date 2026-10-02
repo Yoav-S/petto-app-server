@@ -437,7 +437,7 @@ def test_summary_counts_and_pages(client):
         assert after.json()["deleted"] == 1
 
 
-def test_nearby_lists_published_businesses_closest_first(client):
+def test_nearby_lists_published_businesses_closest_first(client, mock_db):
     with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
         near = client.post(
             "/api/v1/admin/businesses",
@@ -451,12 +451,34 @@ def test_nearby_lists_published_businesses_closest_first(client):
         )
         assert near.status_code == 201, near.text
         assert far.status_code == 201, far.text
+        import asyncio
+
+        asyncio.run(
+            mock_db.business_reviews.insert_one(
+                {"business_id": near.json()["id"], "rating": 5}
+            )
+        )
+        asyncio.run(
+            mock_db.business_reviews.insert_one(
+                {"business_id": near.json()["id"], "rating": 4}
+            )
+        )
 
         listed = client.get(
-            "/api/v1/businesses/nearby?latitude=47.02&longitude=28.83",
+            "/api/v1/businesses/nearby?latitude=47.02&longitude=28.83&limit=1",
             headers=HEADERS_A,
         )
         assert listed.status_code == 200, listed.text
-        names = [item["name"] for item in listed.json()]
-        assert names.index("Near Clinic") < names.index("Far Clinic")
-        assert listed.json()[0]["distance_km"] == 0.0
+        page = listed.json()
+        assert page["has_more"] is True
+        assert page["items"][0]["name"] == "Near Clinic"
+        assert page["items"][0]["distance_km"] == 0.0
+        assert page["items"][0]["rating"] == 4.5
+
+        anywhere = client.get(
+            "/api/v1/businesses/nearby?anywhere=true&offset=0&limit=15",
+            headers=HEADERS_A,
+        )
+        assert anywhere.status_code == 200, anywhere.text
+        names = [item["name"] for item in anywhere.json()["items"]]
+        assert names == ["Far Clinic", "Near Clinic"]
