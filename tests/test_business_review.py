@@ -435,3 +435,28 @@ def test_summary_counts_and_pages(client):
         after = client.get("/api/v1/admin/businesses/summary", headers=HEADERS_B)
         assert after.json()["published"] == 0
         assert after.json()["deleted"] == 1
+
+
+def test_nearby_lists_published_businesses_closest_first(client):
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        near = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(name="Near Clinic", location={"type": "Point", "coordinates": [28.83, 47.02]}),
+            headers=HEADERS_B,
+        )
+        far = client.post(
+            "/api/v1/admin/businesses",
+            json=_payload(name="Far Clinic", location={"type": "Point", "coordinates": [28.95, 47.20]}),
+            headers=HEADERS_B,
+        )
+        assert near.status_code == 201, near.text
+        assert far.status_code == 201, far.text
+
+        listed = client.get(
+            "/api/v1/businesses/nearby?latitude=47.02&longitude=28.83",
+            headers=HEADERS_A,
+        )
+        assert listed.status_code == 200, listed.text
+        names = [item["name"] for item in listed.json()]
+        assert names.index("Near Clinic") < names.index("Far Clinic")
+        assert listed.json()[0]["distance_km"] == 0.0

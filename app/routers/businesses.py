@@ -6,6 +6,7 @@ approve or reject it. A new pending request emails every admin.
 """
 
 import logging
+import math
 import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -32,6 +33,7 @@ from app.models.business import (
     BusinessCounts,
     BusinessOut,
     BusinessPage,
+    BusinessPlace,
     BusinessReject,
     BusinessSession,
     BusinessSubmit,
@@ -480,6 +482,75 @@ async def my_business(
         role=role,
         invitations=pending,
     )
+
+
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    arc = (
+        math.sin(d_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    )
+    return 2 * radius * math.asin(math.sqrt(arc))
+
+
+def _place_image(doc: dict) -> str | None:
+    for url in _gallery(doc):
+        return url
+    photo = _text(doc.get("photo")) or _text(doc.get("photo_url"))
+    if photo and photo.startswith("https://"):
+        return photo
+    return None
+
+
+@router.get("/businesses/nearby", response_model=list[BusinessPlace])
+async def nearby_businesses(
+    latitude: float | None = None,
+    longitude: float | None = None,
+    limit: int = Query(default=20, ge=1, le=50),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Published listings. With coordinates, the closest ones come first."""
+    del current_user
+    docs = await db.businesses.find({"status": "published"}).to_list(500)
+    places: list[BusinessPlace] = []
+    for doc in docs:
+        point = _location(doc)
+        distance = None
+        if (
+            point
+            and latitude is not None
+            and longitude is not None
+        ):
+            lng, lat = point["coordinates"]
+            distance = round(_distance_km(latitude, longitude, lat, lng), 1)
+        data = doc_to_dict(doc)
+        if data.get("category") not in {
+            "veterinarian",
+            "groomer",
+            "pharmacy",
+            "pet_friendly",
+            "pet_store",
+        }:
+            continue
+        places.append(
+            BusinessPlace(
+                id=data["id"],
+                name=_text(data.get("name")) or "",
+                category=data.get("category"),
+                city=_text(data.get("city")) or "",
+                image=_place_image(doc),
+                distance_km=distance,
+            )
+        )
+    if latitude is not None and longitude is not None:
+        places.sort(key=lambda place: (place.distance_km is None, place.distance_km or 0))
+    else:
+        places.sort(key=lambda place: place.name.lower())
+    return places[:limit]
 
 
 @router.post("/businesses", response_model=BusinessOut, status_code=201)

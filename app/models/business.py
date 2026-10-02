@@ -192,6 +192,17 @@ class BusinessPage(BaseModel):
     has_more: bool = False
 
 
+class BusinessPlace(BaseModel):
+    """A published listing shown to pet owners, closest first when a location is sent."""
+
+    id: str
+    name: str
+    category: BusinessCategory
+    city: str
+    image: Optional[str] = None
+    distance_km: Optional[float] = None
+
+
 class BusinessSession(BaseModel):
     is_ragly_admin: bool
     business: Optional[BusinessOut] = None
