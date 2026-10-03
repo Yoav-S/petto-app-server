@@ -586,3 +586,80 @@ def test_nearby_marks_all_day_every_day_as_open_24_7(client, mock_db):
     assert place["open_24_7"] is True
     assert place["closes_at"] is None
     assert place["opens_at"] is None
+
+
+def test_place_detail_returns_contact_hours_and_reviews(client, mock_db):
+    import asyncio
+    from datetime import datetime, timezone
+
+    from bson import ObjectId
+
+    doc_id = ObjectId()
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": doc_id,
+                "name": "Zoomama",
+                "phone": ["+373 69 123 456", "+373 22 000 111"],
+                "description": "A modern veterinary clinic.",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "address": "Str. București 45",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {
+                    "mon": [{"open": "09:00", "close": "19:00"}],
+                    "tue": [],
+                    "wed": [],
+                    "thu": [],
+                    "fri": [],
+                    "sat": [],
+                    "sun": [],
+                },
+                "website": "https://zoomama.md",
+                "instagram": "@zoomama",
+                "location": {"type": "Point", "coordinates": [28.83, 47.02]},
+            }
+        )
+    )
+    asyncio.run(
+        mock_db.users.insert_one(
+            {
+                "firebase_uid": "uid_user_a",
+                "name": "Laurie",
+                "photo_url": "https://example.com/laurie.jpg",
+            }
+        )
+    )
+    asyncio.run(
+        mock_db.business_reviews.insert_one(
+            {
+                "business_id": str(doc_id),
+                "user_id": "uid_user_a",
+                "rating": 5,
+                "comment": "Very kind and caring staff.",
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+    )
+    response = client.get(
+        f"/api/v1/businesses/{doc_id}?latitude=47.02&longitude=28.83",
+        headers=HEADERS_A,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["name"] == "Zoomama"
+    assert body["address"] == "Str. București 45"
+    assert body["phone"] == ["+373 69 123 456", "+373 22 000 111"]
+    assert body["website"] == "https://zoomama.md"
+    assert body["instagram"] == "@zoomama"
+    assert body["opening_hours"]["mon"][0]["open"] == "09:00"
+    assert body["distance_km"] == 0.0
+    assert body["rating"] == 5.0
+    assert body["reviews"][0]["author_name"] == "Laurie"
+    assert body["reviews"][0]["comment"] == "Very kind and caring staff."
+    assert body["reviews"][0]["author_photo"] == "https://example.com/laurie.jpg"
+
+    missing = client.get("/api/v1/businesses/not-an-id", headers=HEADERS_A)
+    assert missing.status_code == 404

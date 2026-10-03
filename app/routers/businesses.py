@@ -34,7 +34,9 @@ from app.models.business import (
     BusinessOut,
     BusinessPage,
     BusinessPlace,
+    BusinessPlaceDetail,
     BusinessPlacePage,
+    PlaceReview,
     BusinessReject,
     BusinessSession,
     BusinessSubmit,
@@ -658,6 +660,102 @@ async def nearby_businesses(
         places.sort(key=lambda place: place.name.lower())
     page = places[offset:offset + limit]
     return BusinessPlacePage(items=page, has_more=offset + limit < len(places))
+
+
+def _phones(doc: dict) -> list[str]:
+    raw = doc.get("phone")
+    if isinstance(raw, list):
+        return [phone.strip() for phone in raw if isinstance(phone, str) and phone.strip()]
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    return []
+
+
+@router.get("/businesses/{business_id}", response_model=BusinessPlaceDetail)
+async def business_place(
+    business_id: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """One published listing for the business screen."""
+    del current_user
+    try:
+        oid = ObjectId(business_id)
+    except Exception:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    doc = await db.businesses.find_one({"_id": oid, "status": "published"})
+    if not doc:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    data = doc_to_dict(doc)
+    point = _location(doc)
+    distance = None
+    if point and latitude is not None and longitude is not None:
+        lng, lat = point["coordinates"]
+        distance = round(_distance_km(latitude, longitude, lat, lng), 1)
+    schedule = _schedule(doc)
+    ratings = await _ratings(db, [data["id"]])
+    review_rows = (
+        await db.business_reviews.find({"business_id": data["id"]})
+        .sort("created_at", -1)
+        .to_list(20)
+    )
+    author_ids = [
+        str(row.get("user_id"))
+        for row in review_rows
+        if isinstance(row.get("user_id"), str) and row.get("user_id")
+    ]
+    authors: dict[str, dict] = {}
+    if author_ids:
+        people = await db.users.find({"firebase_uid": {"$in": author_ids}}).to_list(None)
+        authors = {
+            str(person.get("firebase_uid")): person
+            for person in people
+            if person.get("firebase_uid")
+        }
+    reviews: list[PlaceReview] = []
+    for row in review_rows:
+        rating = row.get("rating")
+        created_at = row.get("created_at")
+        if not isinstance(rating, int) or not isinstance(created_at, datetime):
+            continue
+        if rating < 1 or rating > 5:
+            continue
+        author = authors.get(str(row.get("user_id") or ""), {})
+        comment = row.get("comment")
+        photo = author.get("photo_url")
+        reviews.append(
+            PlaceReview(
+                id=str(row.get("_id")),
+                author_name=_text(author.get("name")) or "",
+                author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
+                rating=rating,
+                comment=_text(comment),
+                created_at=created_at,
+            )
+        )
+    location = None
+    if point:
+        location = {"type": "Point", "coordinates": point["coordinates"]}
+    return BusinessPlaceDetail(
+        id=data["id"],
+        name=_text(data.get("name")) or "",
+        category=data.get("category"),
+        city=_text(data.get("city")) or "",
+        image=_place_image(doc),
+        distance_km=distance,
+        rating=ratings.get(data["id"]),
+        description=_text(data.get("description")),
+        address=_text(data.get("address")) or "",
+        phone=_phones(doc),
+        website=_text(data.get("website")),
+        instagram=_text(data.get("instagram")),
+        opening_hours=_hours(doc),
+        location=location,
+        reviews=reviews,
+        **schedule,
+    )
 
 
 @router.post("/businesses", response_model=BusinessOut, status_code=201)

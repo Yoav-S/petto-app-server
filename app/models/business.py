@@ -215,6 +215,30 @@ class BusinessPlacePage(BaseModel):
     has_more: bool = False
 
 
+class PlaceReview(BaseModel):
+    """A published review row for the business screen. Comment is optional."""
+
+    id: str
+    author_name: str = ""
+    author_photo: Optional[str] = None
+    rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = None
+    created_at: datetime
+
+
+class BusinessPlaceDetail(BusinessPlace):
+    """Published listing plus the fields the business screen shows."""
+
+    description: Optional[str] = None
+    address: str = ""
+    phone: list[str] = Field(default_factory=list)
+    website: Optional[str] = None
+    instagram: Optional[str] = None
+    opening_hours: OpeningHours = Field(default_factory=OpeningHours)
+    location: Optional[GeoLocation] = None
+    reviews: list[PlaceReview] = Field(default_factory=list)
+
+
 class BusinessReview(BaseModel):
     """One pet owner's rating of a business they used.
 
