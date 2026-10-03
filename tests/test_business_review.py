@@ -482,3 +482,107 @@ def test_nearby_lists_published_businesses_closest_first(client, mock_db):
         assert anywhere.status_code == 200, anywhere.text
         names = [item["name"] for item in anywhere.json()["items"]]
         assert names == ["Far Clinic", "Near Clinic"]
+
+
+def test_nearby_treats_24_00_as_end_of_day(client, mock_db):
+    """00:00–24:00 is open all day. A weekend with no slots still has a next open."""
+    import asyncio
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from bson import ObjectId
+
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": ObjectId(),
+                "name": "Ciavdar Grup Clinica Veterinară",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {
+                    "mon": [{"open": "00:00", "close": "24:00"}],
+                    "tue": [{"open": "00:00", "close": "24:00"}],
+                    "wed": [{"open": "00:00", "close": "24:00"}],
+                    "thu": [{"open": "00:00", "close": "24:00"}],
+                    "fri": [{"open": "00:00", "close": "24:00"}],
+                    "sat": [],
+                    "sun": [],
+                },
+                "location": {"type": "Point", "coordinates": [28.86, 47.02]},
+            }
+        )
+    )
+    zone = ZoneInfo("Europe/Chisinau")
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 3, 9, 41, tzinfo=zone)
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls.current
+            return cls.current.astimezone(tz)
+
+    with patch("app.routers.businesses.datetime", Clock):
+        saturday = client.get(
+            "/api/v1/businesses/nearby?latitude=47.02&longitude=28.86",
+            headers=HEADERS_A,
+        )
+        assert saturday.status_code == 200, saturday.text
+        closed = saturday.json()["items"][0]
+        assert closed["open_now"] is False
+        assert closed["opens_at"] == "00:00"
+        assert closed["next_open_day"] == "mon"
+
+        Clock.current = datetime(2026, 9, 30, 12, 0, tzinfo=zone)
+        weekday = client.get(
+            "/api/v1/businesses/nearby?latitude=47.02&longitude=28.86",
+            headers=HEADERS_A,
+        )
+        assert weekday.status_code == 200, weekday.text
+        opened = weekday.json()["items"][0]
+        assert opened["open_now"] is True
+        assert opened["open_24_7"] is False
+        assert opened["closes_at"] == "24:00"
+
+
+def test_nearby_marks_all_day_every_day_as_open_24_7(client, mock_db):
+    import asyncio
+
+    from bson import ObjectId
+
+    day = [{"open": "00:00", "close": "24:00"}]
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": ObjectId(),
+                "name": "Ciavdar Grup Clinica Veterinară",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {
+                    "mon": day,
+                    "tue": day,
+                    "wed": day,
+                    "thu": day,
+                    "fri": day,
+                    "sat": day,
+                    "sun": day,
+                },
+                "location": {"type": "Point", "coordinates": [28.86, 47.02]},
+            }
+        )
+    )
+    listed = client.get(
+        "/api/v1/businesses/nearby?latitude=47.02&longitude=28.86",
+        headers=HEADERS_A,
+    )
+    assert listed.status_code == 200, listed.text
+    place = listed.json()["items"][0]
+    assert place["open_now"] is True
+    assert place["open_24_7"] is True
+    assert place["closes_at"] is None
+    assert place["opens_at"] is None

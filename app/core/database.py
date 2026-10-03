@@ -77,6 +77,11 @@ async def connect_to_db() -> None:
         [("business_id", 1), ("email", 1), ("status", 1)]
     )
     await _db.business_invitations.create_index("email")
+    await _db.business_reviews.create_index(
+        [("business_id", 1), ("user_id", 1)],
+        unique=True,
+    )
+    await _db.business_reviews.create_index("business_id")
 
 
 async def _ensure_reminder_series_date_index(db) -> None:

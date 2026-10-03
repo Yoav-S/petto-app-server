@@ -78,7 +78,7 @@ def _validate_hours(hours: OpeningHours) -> dict:
     for day in _DAYS:
         slots = []
         for slot in getattr(hours, day):
-            if not _TIME.match(slot.open) or not _TIME.match(slot.close):
+            if not _TIME.match(slot.open) or not _is_clock(slot.close, end=True):
                 raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
             if slot.open >= slot.close:
                 raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
@@ -510,8 +510,19 @@ def _clock(minutes: int) -> str:
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
+def _is_clock(value: str, *, end: bool = False) -> bool:
+    """A HH:MM clock. A closing time may be 24:00, the end of that day."""
+    if end and value == "24:00":
+        return True
+    return bool(_TIME.match(value))
+
+
 def _minutes(value: object) -> int | None:
-    if not isinstance(value, str) or not _TIME.match(value):
+    if not isinstance(value, str):
+        return None
+    if value == "24:00":
+        return 24 * 60
+    if not _TIME.match(value):
         return None
     hour, minute = value.split(":")
     return int(hour) * 60 + int(minute)
@@ -521,6 +532,7 @@ def _schedule(doc: dict) -> dict:
     """Open or closed in the business timezone, plus the next change."""
     closed = {
         "open_now": False,
+        "open_24_7": False,
         "closes_at": None,
         "opens_at": None,
         "next_open_day": None,
@@ -528,7 +540,7 @@ def _schedule(doc: dict) -> dict:
     }
     hours = _hours(doc)
     if hours["always_open"]:
-        return {**closed, "open_now": True}
+        return {**closed, "open_now": True, "open_24_7": True}
     tz_name = _text(doc.get("timezone")) or "Europe/Chisinau"
     try:
         zone = ZoneInfo(tz_name)
@@ -547,6 +559,12 @@ def _schedule(doc: dict) -> dict:
                 continue
             parsed.append((start, end))
         return parsed
+
+    def full_day(index: int) -> bool:
+        return any(start == 0 and end >= 24 * 60 - 1 for start, end in slots_for(index))
+
+    if all(full_day(index) for index in range(7)):
+        return {**closed, "open_now": True, "open_24_7": True}
 
     for start, end in slots_for(today):
         if start <= now_min < end:

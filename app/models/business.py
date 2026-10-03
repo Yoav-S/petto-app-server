@@ -203,6 +203,7 @@ class BusinessPlace(BaseModel):
     distance_km: Optional[float] = None
     rating: Optional[float] = None
     open_now: bool = False
+    open_24_7: bool = False
     closes_at: Optional[str] = None
     opens_at: Optional[str] = None
     next_open_day: Optional[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = None
@@ -212,6 +213,21 @@ class BusinessPlace(BaseModel):
 class BusinessPlacePage(BaseModel):
     items: list[BusinessPlace]
     has_more: bool = False
+
+
+class BusinessReview(BaseModel):
+    """One pet owner's rating of a business they used.
+
+    Stored in business_reviews, not on the business document.
+    One review per user per business. No photos.
+    """
+
+    id: str
+    business_id: str
+    user_id: str
+    rating: int = Field(ge=1, le=5)
+    created_at: datetime
+    updated_at: datetime
 
 
 class BusinessSession(BaseModel):
