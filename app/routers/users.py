@@ -10,13 +10,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from datetime import datetime, timezone
 
-from firebase_admin.auth import UserNotFoundError
+from firebase_admin import auth as firebase_auth
+from firebase_admin.auth import EmailAlreadyExistsError, UserNotFoundError
 
 from app.core.database import get_database
 from app.core.firebase import delete_auth_user, delete_user_storage_files
 from app.core.utils import doc_to_dict
 from app.middleware.auth import get_current_user
-from app.models.user import UserNameUpdate, UserOut
+from app.models.user import EmailChangeConfirm, EmailChangeRequest, UserProfileUpdate, UserOut
+from app.routers.auth import _store_and_send_otp
 from app.models.subscription import SubscriptionOut
 from app.core.subscription import normalize_subscription
 
@@ -49,12 +51,22 @@ def _account_name(doc: dict) -> str | None:
     return text or None
 
 
+def _optional_text(doc: dict, key: str) -> str | None:
+    raw = doc.get(key)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    return text or None
+
+
 def _user_to_out(doc: dict, has_pets: bool = False) -> UserOut:
     data = doc_to_dict(doc)
     return UserOut(
         id=data["id"],
         email=data["email"],
         name=_account_name(doc),
+        phone=_optional_text(doc, "phone"),
+        photo_url=_optional_text(doc, "photo_url"),
         auth_provider=data.get("auth_provider", "email"),
         email_verified=data.get("email_verified", False),
         created_at=data["created_at"],
@@ -147,21 +159,119 @@ async def upsert_user(
 
 @router.patch("/me", response_model=UserOut)
 async def update_me(
-    body: UserNameUpdate,
+    body: UserProfileUpdate,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Store the account holder name. Missing name keeps the user in that onboarding step."""
+    """Store the account name. Phone and photo update only when the client sends them."""
     uid = current_user["uid"]
     user = await db.users.find_one({"firebase_uid": uid})
     if not user:
         raise HTTPException(status_code=404, detail={"code": ErrorCode.NOT_FOUND.value})
     now = datetime.now(timezone.utc)
+    updates: dict = {"name": body.name, "updated_at": now}
+    if "phone" in body.model_fields_set:
+        updates["phone"] = body.phone
+    if "photo_url" in body.model_fields_set:
+        updates["photo_url"] = body.photo_url
+    await db.users.update_one({"_id": user["_id"]}, {"$set": updates})
+    user.update(updates)
+    has_pets = await _user_has_pets(uid, db)
+    return _user_to_out(user, has_pets)
+
+
+def _normalize_email(value: str) -> str:
+    return value.lower().strip()
+
+
+async def _email_owned_by_someone_else(
+    db: AsyncIOMotorDatabase,
+    email: str,
+    uid: str,
+) -> bool:
+    other = await db.users.find_one({"email": email})
+    if other and other.get("firebase_uid") != uid:
+        return True
+    try:
+        existing = firebase_auth.get_user_by_email(email)
+    except UserNotFoundError:
+        return False
+    return existing.uid != uid
+
+
+@router.post("/me/email/otp", status_code=200)
+async def send_email_change_otp(
+    body: EmailChangeRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Send a code to a new email. Nothing on the account changes until it is confirmed."""
+    uid = current_user["uid"]
+    user = await db.users.find_one({"firebase_uid": uid})
+    if not user:
+        raise HTTPException(status_code=404, detail={"code": ErrorCode.NOT_FOUND.value})
+    email = _normalize_email(str(body.email))
+    current = _normalize_email(user.get("email") or "")
+    if email == current:
+        raise_api_error(400, ErrorCode.NO_FIELDS_TO_UPDATE)
+    if await _email_owned_by_someone_else(db, email, uid):
+        raise_api_error(409, ErrorCode.EMAIL_IN_USE)
+    await _store_and_send_otp(db, email)
+    await db.email_otps.update_one(
+        {"email": email},
+        {"$set": {"purpose": "email_change", "firebase_uid": uid}},
+    )
+    return {"message": "verification_sent"}
+
+
+@router.post("/me/email/confirm", response_model=UserOut)
+async def confirm_email_change(
+    body: EmailChangeConfirm,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Apply the new email only after the OTP matches. Cancel leaves the old email."""
+    from app.core.otp import OTP_MAX_ATTEMPTS, verify_otp_code
+
+    uid = current_user["uid"]
+    user = await db.users.find_one({"firebase_uid": uid})
+    if not user:
+        raise HTTPException(status_code=404, detail={"code": ErrorCode.NOT_FOUND.value})
+    email = _normalize_email(str(body.email))
+    if await _email_owned_by_someone_else(db, email, uid):
+        raise_api_error(409, ErrorCode.EMAIL_IN_USE)
+    otp_doc = await db.email_otps.find_one({"email": email})
+    if (
+        not otp_doc
+        or otp_doc.get("purpose") != "email_change"
+        or otp_doc.get("firebase_uid") != uid
+    ):
+        raise_api_error(400, ErrorCode.OTP_INVALID)
+    if otp_doc.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+        raise_api_error(429, ErrorCode.OTP_TOO_MANY_ATTEMPTS)
+    expires_at = otp_doc.get("expires_at")
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < datetime.now(timezone.utc):
+            raise_api_error(400, ErrorCode.OTP_EXPIRED)
+    if not verify_otp_code(body.otp, otp_doc["otp_hash"]):
+        await db.email_otps.update_one({"email": email}, {"$inc": {"attempts": 1}})
+        raise_api_error(400, ErrorCode.OTP_INVALID)
+    try:
+        firebase_auth.update_user(uid, email=email, email_verified=True)
+    except EmailAlreadyExistsError:
+        raise_api_error(409, ErrorCode.EMAIL_IN_USE)
+    except UserNotFoundError:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    now = datetime.now(timezone.utc)
     await db.users.update_one(
         {"_id": user["_id"]},
-        {"$set": {"name": body.name, "updated_at": now}},
+        {"$set": {"email": email, "email_verified": True, "updated_at": now}},
     )
-    user["name"] = body.name
+    await db.email_otps.delete_one({"email": email})
+    user["email"] = email
+    user["email_verified"] = True
     has_pets = await _user_has_pets(uid, db)
     return _user_to_out(user, has_pets)
 

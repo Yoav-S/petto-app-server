@@ -22,6 +22,7 @@ class ErrorCode(StrEnum):
     OTP_RESEND_COOLDOWN = "otp_resend_cooldown"
     EMAIL_NOT_VERIFIED = "email_not_verified"
     EMAIL_SEND_FAILED = "email_send_failed"
+    EMAIL_IN_USE = "email_in_use"
     NO_FIELDS_TO_UPDATE = "no_fields_to_update"
     ALREADY_RESOLVED = "already_resolved"
     DUPLICATE_REMINDER_DATETIME = "duplicate_reminder_datetime"
