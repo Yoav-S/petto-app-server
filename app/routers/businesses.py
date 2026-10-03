@@ -699,7 +699,7 @@ async def business_place(
     review_rows = (
         await db.business_reviews.find({"business_id": data["id"]})
         .sort("created_at", -1)
-        .to_list(20)
+        .to_list(100)
     )
     author_ids = [
         str(row.get("user_id"))
