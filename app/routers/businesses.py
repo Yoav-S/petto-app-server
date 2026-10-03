@@ -26,7 +26,7 @@ from app.core.email_service import (
     send_business_review_email,
 )
 from app.core.errors import ErrorCode, raise_api_error
-from app.core.utils import doc_to_dict
+from app.core.utils import doc_to_dict, is_valid_object_id
 from app.middleware.auth import get_current_user
 from app.models.business import (
     AdminPublish,
@@ -663,6 +663,73 @@ async def nearby_businesses(
     return BusinessPlacePage(items=page, has_more=offset + limit < len(places))
 
 
+REVIEW_PAGE_SIZE = 15
+
+
+async def _place_reviews(
+    db: AsyncIOMotorDatabase,
+    business_id: str,
+    uid: str,
+    *,
+    limit: int = REVIEW_PAGE_SIZE,
+    cursor: str | None = None,
+) -> list[PlaceReview]:
+    """Newest reviews first. `cursor` is the last id from the previous page."""
+    query: dict = {"business_id": business_id}
+    if cursor and is_valid_object_id(cursor):
+        last = await db.business_reviews.find_one(
+            {"_id": ObjectId(cursor), "business_id": business_id}
+        )
+        created_at = last.get("created_at") if last else None
+        if last and isinstance(created_at, datetime):
+            last_id = last["_id"]
+            query["$or"] = [
+                {"created_at": {"$lt": created_at}},
+                {"created_at": created_at, "_id": {"$lt": last_id}},
+            ]
+    rows = (
+        await db.business_reviews.find(query)
+        .sort([("created_at", -1), ("_id", -1)])
+        .limit(limit)
+        .to_list(limit)
+    )
+    author_ids = [
+        str(row.get("user_id"))
+        for row in rows
+        if isinstance(row.get("user_id"), str) and row.get("user_id")
+    ]
+    authors: dict[str, dict] = {}
+    if author_ids:
+        people = await db.users.find({"firebase_uid": {"$in": author_ids}}).to_list(None)
+        authors = {
+            str(person.get("firebase_uid")): person
+            for person in people
+            if person.get("firebase_uid")
+        }
+    reviews: list[PlaceReview] = []
+    for row in rows:
+        rating = row.get("rating")
+        created_at = row.get("created_at")
+        if not isinstance(rating, int) or not isinstance(created_at, datetime):
+            continue
+        if rating < 1 or rating > 5:
+            continue
+        author = authors.get(str(row.get("user_id") or ""), {})
+        photo = author.get("photo_url")
+        reviews.append(
+            PlaceReview(
+                id=str(row.get("_id")),
+                author_name=_text(author.get("name")) or "",
+                author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
+                rating=rating,
+                comment=_text(row.get("comment")),
+                created_at=created_at,
+                is_mine=str(row.get("user_id") or "") == uid,
+            )
+        )
+    return reviews
+
+
 def _phones(doc: dict) -> list[str]:
     raw = doc.get("phone")
     if isinstance(raw, list):
@@ -697,46 +764,7 @@ async def business_place(
         distance = round(_distance_km(latitude, longitude, lat, lng), 1)
     schedule = _schedule(doc)
     ratings = await _ratings(db, [data["id"]])
-    review_rows = (
-        await db.business_reviews.find({"business_id": data["id"]})
-        .sort("created_at", -1)
-        .to_list(100)
-    )
-    author_ids = [
-        str(row.get("user_id"))
-        for row in review_rows
-        if isinstance(row.get("user_id"), str) and row.get("user_id")
-    ]
-    authors: dict[str, dict] = {}
-    if author_ids:
-        people = await db.users.find({"firebase_uid": {"$in": author_ids}}).to_list(None)
-        authors = {
-            str(person.get("firebase_uid")): person
-            for person in people
-            if person.get("firebase_uid")
-        }
-    reviews: list[PlaceReview] = []
-    for row in review_rows:
-        rating = row.get("rating")
-        created_at = row.get("created_at")
-        if not isinstance(rating, int) or not isinstance(created_at, datetime):
-            continue
-        if rating < 1 or rating > 5:
-            continue
-        author = authors.get(str(row.get("user_id") or ""), {})
-        comment = row.get("comment")
-        photo = author.get("photo_url")
-        reviews.append(
-            PlaceReview(
-                id=str(row.get("_id")),
-                author_name=_text(author.get("name")) or "",
-                author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
-                rating=rating,
-                comment=_text(comment),
-                created_at=created_at,
-                is_mine=str(row.get("user_id") or "") == uid,
-            )
-        )
+    reviews = await _place_reviews(db, data["id"], uid, limit=REVIEW_PAGE_SIZE)
     location = None
     if point:
         location = {"type": "Point", "coordinates": point["coordinates"]}
@@ -757,6 +785,31 @@ async def business_place(
         location=location,
         reviews=reviews,
         **schedule,
+    )
+
+
+@router.get("/businesses/{business_id}/reviews", response_model=list[PlaceReview])
+async def list_business_reviews(
+    business_id: str,
+    limit: int = Query(REVIEW_PAGE_SIZE, ge=1, le=REVIEW_PAGE_SIZE),
+    cursor: str | None = Query(None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """One page of reviews, newest first. Pass the last id as `cursor` for the next page."""
+    try:
+        oid = ObjectId(business_id)
+    except Exception:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    business = await db.businesses.find_one({"_id": oid, "status": "published"})
+    if not business:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    return await _place_reviews(
+        db,
+        business_id,
+        current_user["uid"],
+        limit=limit,
+        cursor=cursor,
     )
 
 

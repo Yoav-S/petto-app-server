@@ -715,3 +715,57 @@ def test_owner_review_is_saved_once_and_updates_the_rating(client, mock_db):
     assert body["rating"] == 5.0
     assert body["reviews"][0]["comment"] == "Even better the second time."
     assert body["reviews"][0]["is_mine"] is True
+
+
+def test_reviews_page_is_fifteen_and_the_cursor_continues(client, mock_db):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    from bson import ObjectId
+
+    doc_id = ObjectId()
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": doc_id,
+                "name": "Zoomama",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "address": "Str. București 45",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {"mon": [{"open": "09:00", "close": "19:00"}]},
+            }
+        )
+    )
+    start = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    for index in range(16):
+        asyncio.run(
+            mock_db.business_reviews.insert_one(
+                {
+                    "_id": ObjectId(),
+                    "business_id": str(doc_id),
+                    "user_id": f"uid_{index}",
+                    "rating": 5,
+                    "comment": f"Review {index}",
+                    "created_at": start + timedelta(minutes=index),
+                }
+            )
+        )
+
+    first = client.get(f"/api/v1/businesses/{doc_id}/reviews", headers=HEADERS_A)
+    assert first.status_code == 200, first.text
+    page = first.json()
+    assert len(page) == 15
+    assert page[0]["comment"] == "Review 15"
+    assert page[-1]["comment"] == "Review 1"
+
+    second = client.get(
+        f"/api/v1/businesses/{doc_id}/reviews",
+        headers=HEADERS_A,
+        params={"cursor": page[-1]["id"]},
+    )
+    assert second.status_code == 200, second.text
+    rest = second.json()
+    assert [item["comment"] for item in rest] == ["Review 0"]
+    assert {item["id"] for item in page}.isdisjoint({item["id"] for item in rest})
