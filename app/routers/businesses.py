@@ -37,6 +37,7 @@ from app.models.business import (
     BusinessPlaceDetail,
     BusinessPlacePage,
     PlaceReview,
+    ReviewWrite,
     BusinessReject,
     BusinessSession,
     BusinessSubmit,
@@ -680,7 +681,7 @@ async def business_place(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """One published listing for the business screen."""
-    del current_user
+    uid = current_user["uid"]
     try:
         oid = ObjectId(business_id)
     except Exception:
@@ -733,6 +734,7 @@ async def business_place(
                 rating=rating,
                 comment=_text(comment),
                 created_at=created_at,
+                is_mine=str(row.get("user_id") or "") == uid,
             )
         )
     location = None
@@ -755,6 +757,57 @@ async def business_place(
         location=location,
         reviews=reviews,
         **schedule,
+    )
+
+
+@router.post("/businesses/{business_id}/reviews", response_model=PlaceReview)
+async def write_business_review(
+    business_id: str,
+    body: ReviewWrite,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Save this user's rating. A second save updates the same review."""
+    try:
+        oid = ObjectId(business_id)
+    except Exception:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    business = await db.businesses.find_one({"_id": oid, "status": "published"})
+    if not business:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    uid = current_user["uid"]
+    now = datetime.now(timezone.utc)
+    existing = await db.business_reviews.find_one({"business_id": business_id, "user_id": uid})
+    if existing:
+        await db.business_reviews.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {"rating": body.rating, "comment": body.comment, "updated_at": now}},
+        )
+        created_at = existing.get("created_at") or now
+        review_id = existing["_id"]
+    else:
+        created_at = now
+        inserted = await db.business_reviews.insert_one(
+            {
+                "business_id": business_id,
+                "user_id": uid,
+                "rating": body.rating,
+                "comment": body.comment,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        review_id = inserted.inserted_id
+    author = await db.users.find_one({"firebase_uid": uid}) or {}
+    photo = author.get("photo_url")
+    return PlaceReview(
+        id=str(review_id),
+        author_name=_text(author.get("name")) or "",
+        author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
+        rating=body.rating,
+        comment=body.comment,
+        created_at=created_at if isinstance(created_at, datetime) else now,
+        is_mine=True,
     )
 
 

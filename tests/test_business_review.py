@@ -663,3 +663,55 @@ def test_place_detail_returns_contact_hours_and_reviews(client, mock_db):
 
     missing = client.get("/api/v1/businesses/not-an-id", headers=HEADERS_A)
     assert missing.status_code == 404
+
+
+def test_owner_review_is_saved_once_and_updates_the_rating(client, mock_db):
+    import asyncio
+
+    from bson import ObjectId
+
+    doc_id = ObjectId()
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": doc_id,
+                "name": "Zoomama",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "address": "Str. București 45",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {"mon": [{"open": "09:00", "close": "19:00"}]},
+            }
+        )
+    )
+    asyncio.run(
+        mock_db.users.insert_one(
+            {"firebase_uid": "uid_user_a", "name": "Yoav", "photo_url": "https://example.com/yoav.jpg"}
+        )
+    )
+    created = client.post(
+        f"/api/v1/businesses/{doc_id}/reviews",
+        headers=HEADERS_A,
+        json={"rating": 4, "comment": "  Kind staff.  "},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["rating"] == 4
+    assert created.json()["comment"] == "Kind staff."
+    assert created.json()["author_name"] == "Yoav"
+    assert created.json()["is_mine"] is True
+
+    updated = client.post(
+        f"/api/v1/businesses/{doc_id}/reviews",
+        headers=HEADERS_A,
+        json={"rating": 5, "comment": "Even better the second time."},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["id"] == created.json()["id"]
+    assert mock_db.business_reviews._col.count_documents({"business_id": str(doc_id)}) == 1
+
+    listed = client.get(f"/api/v1/businesses/{doc_id}", headers=HEADERS_A)
+    body = listed.json()
+    assert body["rating"] == 5.0
+    assert body["reviews"][0]["comment"] == "Even better the second time."
+    assert body["reviews"][0]["is_mine"] is True

@@ -224,6 +224,22 @@ class PlaceReview(BaseModel):
     rating: int = Field(ge=1, le=5)
     comment: Optional[str] = None
     created_at: datetime
+    is_mine: bool = False
+
+
+class ReviewWrite(BaseModel):
+    """One rating from the signed-in pet owner. The comment can be empty."""
+
+    rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator("comment")
+    @classmethod
+    def comment_clean(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
 
 
 class BusinessPlaceDetail(BusinessPlace):
@@ -250,6 +266,7 @@ class BusinessReview(BaseModel):
     business_id: str
     user_id: str
     rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
