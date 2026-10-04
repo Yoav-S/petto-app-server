@@ -78,6 +78,8 @@ async def create_pet(
     }
     result = await db.pets.insert_one(doc)
     doc["_id"] = result.inserted_id
+    # First pet finishes setup. Drop the resume draft so the next login opens the app.
+    await db.users.update_one({"firebase_uid": uid}, {"$unset": {"onboarding": ""}})
     return PetOut(**doc_to_dict(doc))
 
 

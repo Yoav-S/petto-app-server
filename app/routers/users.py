@@ -7,6 +7,7 @@ GET  /users/me  — return current user profile
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import ValidationError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from datetime import datetime, timezone
 
@@ -17,7 +18,14 @@ from app.core.database import get_database
 from app.core.firebase import delete_auth_user, delete_user_storage_files
 from app.core.utils import doc_to_dict
 from app.middleware.auth import get_current_user
-from app.models.user import EmailChangeConfirm, EmailChangeRequest, UserProfileUpdate, UserOut
+from app.models.user import (
+    EmailChangeConfirm,
+    EmailChangeRequest,
+    OnboardingProgress,
+    UserProfileUpdate,
+    UserOut,
+    coherent_onboarding,
+)
 from app.routers.auth import _store_and_send_otp
 from app.models.subscription import SubscriptionOut
 from app.core.subscription import normalize_subscription
@@ -59,6 +67,19 @@ def _optional_text(doc: dict, key: str) -> str | None:
     return text or None
 
 
+def _onboarding_out(doc: dict, has_pets: bool) -> OnboardingProgress | None:
+    """Finished accounts never resume setup. A broken draft is ignored."""
+    if has_pets:
+        return None
+    raw = doc.get("onboarding")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return coherent_onboarding(OnboardingProgress.model_validate(raw))
+    except ValidationError:
+        return None
+
+
 def _user_to_out(doc: dict, has_pets: bool = False) -> UserOut:
     data = doc_to_dict(doc)
     return UserOut(
@@ -72,6 +93,7 @@ def _user_to_out(doc: dict, has_pets: bool = False) -> UserOut:
         created_at=data["created_at"],
         last_login_at=data.get("last_login_at"),
         has_pets=has_pets,
+        onboarding=_onboarding_out(doc, has_pets),
         subscription=_subscription_out(doc),
     )
 
@@ -178,6 +200,35 @@ async def update_me(
     user.update(updates)
     has_pets = await _user_has_pets(uid, db)
     return _user_to_out(user, has_pets)
+
+
+@router.patch("/me/onboarding", response_model=UserOut)
+async def save_onboarding(
+    body: OnboardingProgress,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """
+    Remember the first-pet step and the answers already given.
+    A later login resumes this step. Creating the pet clears it.
+    Once a pet exists, the draft is left untouched and not returned.
+    """
+    uid = current_user["uid"]
+    user = await db.users.find_one({"firebase_uid": uid})
+    if not user:
+        raise HTTPException(status_code=404, detail={"code": ErrorCode.NOT_FOUND.value})
+    has_pets = await _user_has_pets(uid, db)
+    if has_pets:
+        return _user_to_out(user, True)
+    progress = coherent_onboarding(body)
+    now = datetime.now(timezone.utc)
+    stored = progress.model_dump()
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"onboarding": stored, "updated_at": now}},
+    )
+    user["onboarding"] = stored
+    return _user_to_out(user, False)
 
 
 def _normalize_email(value: str) -> str:

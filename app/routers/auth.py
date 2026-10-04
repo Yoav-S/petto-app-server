@@ -223,6 +223,8 @@ async def verify_otp(
         custom_token = token_bytes.decode("utf-8") if isinstance(token_bytes, bytes) else token_bytes
 
         now = datetime.now(timezone.utc)
+        # Same email is the same account. $set never clears onboarding, so a
+        # started setup cannot be registered again as a blank user.
         await db.users.update_one(
             {"email": email},
             {
