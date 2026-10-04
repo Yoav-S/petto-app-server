@@ -130,13 +130,56 @@ class AdminPublish(BusinessSubmit):
         return text
 
 
+MemberRole = Literal["owner", "branch_owner", "lead", "worker"]
+
+
+class LocationWrite(BaseModel):
+    """One branch. Phone is only set when this branch has its own number."""
+
+    address: str = Field(min_length=1, max_length=300)
+    city: str = Field(min_length=1, max_length=120)
+    timezone: str = Field(min_length=1, max_length=64)
+    opening_hours: OpeningHours
+    location: GeoLocation
+    phone: list[str] = Field(default_factory=list)
+
+    @field_validator("phone")
+    @classmethod
+    def phone_clean(cls, value: list[str]) -> list[str]:
+        return [phone.strip() for phone in value if phone and phone.strip()]
+
+
+class LocationOut(LocationWrite):
+    id: str
+    business_id: str
+
+
+class PlaceLocation(BaseModel):
+    """A branch on the public business screen.
+
+    `phone` is only the branch number. `call_phone` is the number to dial:
+    the branch number, or the business number when the branch has none.
+    """
+
+    id: str
+    address: str
+    city: str
+    opening_hours: OpeningHours
+    phone: list[str] = Field(default_factory=list)
+    call_phone: list[str] = Field(default_factory=list)
+    shared_phone: bool = False
+    location: Optional[GeoLocation] = None
+    distance_km: Optional[float] = None
+
+
 class InvitationOut(BaseModel):
     id: str
     business_id: str
     business_name: str = ""
     email: str
-    role: Literal["owner", "worker"]
+    role: MemberRole
     status: Literal["pending", "approved", "declined"]
+    location_id: Optional[str] = None
 
 
 class BusinessOut(BaseModel):
@@ -165,6 +208,7 @@ class BusinessOut(BaseModel):
     updated_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     invitations: list[InvitationOut] = Field(default_factory=list)
+    locations: list[LocationOut] = Field(default_factory=list)
 
 
 class PhotoRemove(BaseModel):
@@ -177,7 +221,9 @@ class OwnerInvite(BaseModel):
 
 class TeamInvite(BaseModel):
     email: str = Field(min_length=3, max_length=320)
-    role: Literal["owner", "worker"]
+    role: MemberRole
+    location_id: Optional[str] = None
+    reports_to: Optional[str] = None
 
 
 class BusinessCounts(BaseModel):
@@ -208,6 +254,8 @@ class BusinessPlace(BaseModel):
     opens_at: Optional[str] = None
     next_open_day: Optional[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = None
     opens_tomorrow: bool = False
+    address: str = ""
+    location_count: int = 1
 
 
 class BusinessPlacePage(BaseModel):
@@ -253,6 +301,7 @@ class BusinessPlaceDetail(BusinessPlace):
     opening_hours: OpeningHours = Field(default_factory=OpeningHours)
     location: Optional[GeoLocation] = None
     reviews: list[PlaceReview] = Field(default_factory=list)
+    locations: list[PlaceLocation] = Field(default_factory=list)
 
 
 class BusinessReview(BaseModel):
@@ -271,8 +320,17 @@ class BusinessReview(BaseModel):
     updated_at: datetime
 
 
+class BusinessMembership(BaseModel):
+    """One business this account can open. An owner has no location_id: every branch."""
+
+    business: BusinessOut
+    role: MemberRole
+    location_id: Optional[str] = None
+
+
 class BusinessSession(BaseModel):
     is_ragly_admin: bool
     business: Optional[BusinessOut] = None
-    role: Optional[Literal["owner", "worker"]] = None
+    businesses: list[BusinessMembership] = Field(default_factory=list)
+    role: Optional[MemberRole] = None
     invitations: list[InvitationOut] = Field(default_factory=list)

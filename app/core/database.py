@@ -59,20 +59,21 @@ async def connect_to_db() -> None:
 
     indexes = await _db.businesses.index_information()
     owner_index = indexes.get("owner_uid_1")
-    if owner_index and "partialFilterExpression" not in owner_index:
+    # One person can own several businesses. Drop the old one-business unique index.
+    if owner_index and owner_index.get("unique"):
         await _db.businesses.drop_index("owner_uid_1")
         owner_index = None
     if owner_index is None:
-        await _db.businesses.create_index(
-            "owner_uid",
-            unique=True,
-            partialFilterExpression={"owner_uid": {"$type": "string"}},
-        )
+        await _db.businesses.create_index("owner_uid")
     await _db.businesses.create_index("status")
+    member_indexes = await _db.business_members.index_information()
+    if "business_id_1_user_id_1" in member_indexes:
+        await _db.business_members.drop_index("business_id_1_user_id_1")
     await _db.business_members.create_index(
-        [("business_id", 1), ("user_id", 1)],
+        [("business_id", 1), ("user_id", 1), ("location_id", 1)],
         unique=True,
     )
+    await _db.business_locations.create_index("business_id")
     await _db.business_invitations.create_index(
         [("business_id", 1), ("email", 1), ("status", 1)]
     )
