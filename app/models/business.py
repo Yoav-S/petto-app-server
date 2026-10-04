@@ -152,6 +152,34 @@ class LocationWrite(BaseModel):
 class LocationOut(LocationWrite):
     id: str
     business_id: str
+    status: Literal["pending_review", "published", "rejected"] = "published"
+    rejection_reason: Optional[str] = None
+
+
+class StoreReview(BaseModel):
+    """A branch waiting in the admin panel, with the business it belongs to."""
+
+    id: str
+    business_id: str
+    business_name: str
+    address: str
+    city: str
+    phone: list[str] = Field(default_factory=list)
+    opening_hours: OpeningHours
+    status: Literal["pending_review", "published", "rejected"]
+    rejection_reason: Optional[str] = None
+
+
+class StoreReject(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_present(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("reason")
+        return text
 
 
 class PlaceLocation(BaseModel):

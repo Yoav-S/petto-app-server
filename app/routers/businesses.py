@@ -32,9 +32,11 @@ from app.locations import (
     list_location_docs,
     location_out,
     location_payload,
+    location_status,
     locations_for,
     mirror_fields,
     place_location,
+    public_locations,
 )
 from app.middleware.auth import get_current_user
 from app.models.business import (
@@ -55,6 +57,8 @@ from app.models.business import (
     OpeningHours,
     LocationOut,
     LocationWrite,
+    StoreReject,
+    StoreReview,
     OwnerInvite,
     PhotoRemove,
     TeamInvite,
@@ -720,7 +724,7 @@ async def nearby_businesses(
             "pet_store",
         }:
             continue
-        branches = located.get(data["id"]) or await ensure_locations(db, doc)
+        branches = public_locations(located.get(data["id"]) or await ensure_locations(db, doc))
         chosen = doc
         chosen_point = _location(doc)
         distance = _distance_between(latitude, longitude, chosen_point)
@@ -858,7 +862,7 @@ async def business_place(
     if not doc:
         raise_api_error(404, ErrorCode.NOT_FOUND)
     data = doc_to_dict(doc)
-    branches = await ensure_locations(db, doc)
+    branches = public_locations(await ensure_locations(db, doc))
     business_phone = _phones(doc)
     public_branches = []
     closest = None
@@ -1174,6 +1178,91 @@ async def business_summary(
     )
 
 
+@router.get("/admin/locations", response_model=list[StoreReview])
+async def admin_locations(
+    status: Literal["pending_review", "published", "rejected"] = "pending_review",
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Branches an owner added. They stay off the app until an admin approves them."""
+    _require_admin(current_user)
+    rows = await db.business_locations.find({"status": status}).sort("_id", 1).to_list(None)
+    business_ids = [
+        ObjectId(row["business_id"])
+        for row in rows
+        if ObjectId.is_valid(str(row.get("business_id")))
+    ]
+    names: dict[str, str] = {}
+    if business_ids:
+        businesses = await db.businesses.find({"_id": {"$in": business_ids}}).to_list(None)
+        names = {str(business["_id"]): business.get("name") or "" for business in businesses}
+    reviews: list[StoreReview] = []
+    for row in rows:
+        listed = location_out(row)
+        reviews.append(
+            StoreReview(
+                id=listed.id,
+                business_id=listed.business_id,
+                business_name=names.get(listed.business_id, ""),
+                address=listed.address,
+                city=listed.city,
+                phone=listed.phone,
+                opening_hours=listed.opening_hours,
+                status=listed.status,
+                rejection_reason=listed.rejection_reason,
+            )
+        )
+    return reviews
+
+
+async def _pending_location(db: AsyncIOMotorDatabase, location_id: str) -> dict:
+    if not ObjectId.is_valid(location_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    row = await db.business_locations.find_one({"_id": ObjectId(location_id)})
+    if not row or location_status(row) != "pending_review":
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    return row
+
+
+@router.post("/admin/locations/{location_id}/approve", response_model=LocationOut)
+async def approve_location(
+    location_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Publish a branch. Pet owners can see it after this."""
+    _require_admin(current_user)
+    row = await _pending_location(db, location_id)
+    now = datetime.now(timezone.utc)
+    await db.business_locations.update_one(
+        {"_id": row["_id"]},
+        {"$set": {"status": "published", "rejection_reason": None, "updated_at": now}},
+    )
+    row["status"] = "published"
+    row["rejection_reason"] = None
+    return location_out(row)
+
+
+@router.post("/admin/locations/{location_id}/reject", response_model=LocationOut)
+async def reject_location(
+    location_id: str,
+    body: StoreReject,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Keep a branch off the app and show the owner the note."""
+    _require_admin(current_user)
+    row = await _pending_location(db, location_id)
+    now = datetime.now(timezone.utc)
+    await db.business_locations.update_one(
+        {"_id": row["_id"]},
+        {"$set": {"status": "rejected", "rejection_reason": body.reason, "updated_at": now}},
+    )
+    row["status"] = "rejected"
+    row["rejection_reason"] = body.reason
+    return location_out(row)
+
+
 @router.get("/admin/businesses/page", response_model=BusinessPage)
 async def page_businesses(
     limit: int = Query(default=20, ge=1, le=50),
@@ -1301,6 +1390,8 @@ async def add_location(
     doc = {
         **location_payload(body),
         "business_id": str(business["_id"]),
+        "status": "pending_review",
+        "rejection_reason": None,
         "created_at": now,
         "updated_at": now,
     }
@@ -1366,6 +1457,12 @@ async def delete_location(
     if not ObjectId.is_valid(location_id):
         raise_api_error(404, ErrorCode.NOT_FOUND)
     rows = await list_location_docs(db, str(business["_id"]))
+    target = next((row for row in rows if str(row.get("_id")) == location_id), None)
+    if target is None:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    published = [row for row in rows if location_status(row) == "published"]
+    if location_status(target) == "published" and len(published) <= 1:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
     if len(rows) <= 1:
         raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
     await db.business_locations.delete_one(
@@ -1403,6 +1500,8 @@ async def owner_invite_member(
         )
         if not branch:
             raise_api_error(404, ErrorCode.NOT_FOUND)
+        if location_status(branch) != "published":
+            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
         if not is_owner:
             mine = await db.business_members.find(
                 {"business_id": str(business["_id"]), "user_id": uid, "location_id": location_id}

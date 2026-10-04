@@ -1,8 +1,10 @@
 """A business is one brand. Each branch is its own address, hours, and phone."""
 import asyncio
 from datetime import datetime, timezone
+from unittest.mock import patch
 
-from tests.conftest import HEADERS_A, USER_A_UID
+from app.core.config import settings
+from tests.conftest import HEADERS_A, HEADERS_B, USER_A_UID
 
 
 def _business(name: str, phone: list[str], address: str, lng: float, lat: float) -> dict:
@@ -50,6 +52,18 @@ def test_nearby_returns_one_card_for_the_closest_branch(client, mock_db):
                 "phone": ["+373 60 111 111"],
             }
         )
+        await mock_db.business_locations.insert_one(
+            {
+                "business_id": business_id,
+                "address": "Str. Pending 1",
+                "city": "Chișinău",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {"always_open": False, "mon": [{"open": "10:00", "close": "18:00"}]},
+                "location": {"type": "Point", "coordinates": [28.79, 47.00]},
+                "phone": [],
+                "status": "pending_review",
+            }
+        )
 
     asyncio.run(seed())
     nearby = client.get(
@@ -62,6 +76,7 @@ def test_nearby_returns_one_card_for_the_closest_branch(client, mock_db):
     assert len(items) == 1
     assert items[0]["name"] == "Zoomama"
     assert items[0]["location_count"] == 2
+    assert "Str. Pending 1" not in {item["address"] for item in items}
     assert items[0]["address"] == "Str. Alba Iulia 12"
 
     detail = client.get(
@@ -78,6 +93,7 @@ def test_nearby_returns_one_card_for_the_closest_branch(client, mock_db):
     assert branches["Str. București 45"]["call_phone"] == ["+373 22 000 000"]
     assert branches["Str. Alba Iulia 12"]["shared_phone"] is False
     assert branches["Str. Alba Iulia 12"]["phone"] == ["+373 60 111 111"]
+    assert "Str. Pending 1" not in branches
 
 
 def test_owner_sees_every_business_and_can_add_a_store(client, mock_db):
@@ -112,3 +128,42 @@ def test_owner_sees_every_business_and_can_add_a_store(client, mock_db):
     )
     assert added.status_code == 201, added.text
     assert added.json()["phone"] == ["+373 60 111 111"]
+    assert added.json()["status"] == "pending_review"
+
+    hidden = client.get(
+        "/api/v1/businesses/nearby",
+        headers=HEADERS_A,
+        params={"latitude": 47.01, "longitude": 28.80},
+    )
+    assert hidden.status_code == 200, hidden.text
+    card = next(item for item in hidden.json()["items"] if item["name"] == "Zoomama")
+    assert card["location_count"] == 1
+    assert card["address"] == "Str. București 45"
+
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+        queue = client.get("/api/v1/admin/locations", headers=HEADERS_B)
+        assert queue.status_code == 200, queue.text
+        waiting = queue.json()
+        assert len(waiting) == 1
+        assert waiting[0]["business_name"] == "Zoomama"
+        assert waiting[0]["address"] == "Str. Alba Iulia 12"
+        blocked = client.post(
+            f"/api/v1/admin/locations/{waiting[0]['id']}/approve",
+            headers=HEADERS_A,
+        )
+        assert blocked.status_code == 403
+        approved = client.post(
+            f"/api/v1/admin/locations/{waiting[0]['id']}/approve",
+            headers=HEADERS_B,
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["status"] == "published"
+
+    visible = client.get(
+        "/api/v1/businesses/nearby",
+        headers=HEADERS_A,
+        params={"latitude": 47.01, "longitude": 28.80},
+    )
+    assert visible.status_code == 200, visible.text
+    shown = next(item for item in visible.json()["items"] if item["name"] == "Zoomama")
+    assert shown["location_count"] == 2

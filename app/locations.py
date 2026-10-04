@@ -46,9 +46,26 @@ def _text(value: object) -> str:
     return value.strip()
 
 
+def location_status(doc: dict) -> str:
+    """Rows saved before review have no status. Those stay public."""
+    status = doc.get("status")
+    if status in {"pending_review", "published", "rejected"}:
+        return str(status)
+    return "published"
+
+
+def is_public_location(doc: dict) -> bool:
+    return location_status(doc) == "published"
+
+
+def public_locations(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if is_public_location(row)]
+
+
 def location_out(doc: dict) -> LocationOut:
     data = doc_to_dict(doc)
     point = _point(doc.get("location"))
+    reason = _text(doc.get("rejection_reason"))
     return LocationOut(
         id=data["id"],
         business_id=str(doc.get("business_id") or ""),
@@ -58,6 +75,8 @@ def location_out(doc: dict) -> LocationOut:
         opening_hours=OpeningHours(**_hours(doc.get("opening_hours"))),
         location=point or {"type": "Point", "coordinates": [0.0, 0.0]},
         phone=_phones(doc.get("phone")),
+        status=location_status(doc),
+        rejection_reason=reason or None,
     )
 
 
@@ -117,6 +136,7 @@ async def ensure_locations(db: AsyncIOMotorDatabase, business: dict) -> list[dic
         "opening_hours": _hours(business.get("opening_hours")),
         "location": point,
         "phone": [],
+        "status": "published",
         "created_at": now,
         "updated_at": now,
     }
