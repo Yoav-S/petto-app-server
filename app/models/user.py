@@ -2,6 +2,8 @@
 user.py — Pydantic models for the User entity.
 """
 from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from app.contact import clean_phone
 from typing import Optional, Literal
 from datetime import datetime
 
@@ -41,7 +43,12 @@ class UserProfileUpdate(UserNameUpdate):
         if value is None:
             return None
         text = value.strip()
-        return text or None
+        if not text:
+            return None
+        phone = clean_phone(text)
+        if phone is None:
+            raise ValueError("phone")
+        return phone
 
     @field_validator("photo_url")
     @classmethod

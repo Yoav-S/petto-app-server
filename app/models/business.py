@@ -5,6 +5,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.contact import clean_email, clean_instagram, clean_phone_list, clean_website
+
 BusinessCategory = Literal[
     "veterinarian",
     "groomer",
@@ -69,10 +71,22 @@ class BusinessSubmit(BaseModel):
     @field_validator("phone")
     @classmethod
     def phone_present(cls, value: list[str]) -> list[str]:
-        cleaned = [phone.strip() for phone in value if phone and phone.strip()]
-        if not cleaned:
-            raise ValueError("phone")
-        return cleaned
+        return clean_phone_list(value, required=True)
+
+    @field_validator("email")
+    @classmethod
+    def email_optional(cls, value: Optional[str]) -> Optional[str]:
+        return clean_email(value)
+
+    @field_validator("website")
+    @classmethod
+    def website_optional(cls, value: Optional[str]) -> Optional[str]:
+        return clean_website(value)
+
+    @field_validator("instagram")
+    @classmethod
+    def instagram_optional(cls, value: Optional[str]) -> Optional[str]:
+        return clean_instagram(value)
 
 
 _REVIEW_FIELDS = frozenset(
@@ -146,7 +160,7 @@ class LocationWrite(BaseModel):
     @field_validator("phone")
     @classmethod
     def phone_clean(cls, value: list[str]) -> list[str]:
-        return [phone.strip() for phone in value if phone and phone.strip()]
+        return clean_phone_list(value, required=False)
 
 
 class LocationOut(LocationWrite):

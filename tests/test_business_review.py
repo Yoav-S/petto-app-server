@@ -68,6 +68,55 @@ def test_owner_submit_and_admin_approve(client):
             assert admin_session.json()["is_ragly_admin"] is True
 
 
+def test_optional_contact_fields_can_stay_empty(client):
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", ""):
+        created = client.post(
+            "/api/v1/businesses",
+            json=_payload(website=None, email=None, description=None, instagram=None),
+            headers=HEADERS_A,
+        )
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["email"] is None
+        assert body["website"] is None
+        assert body["description"] is None
+        assert body["instagram"] is None
+
+
+def test_plain_website_phone_and_instagram_are_accepted(client):
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", ""):
+        created = client.post(
+            "/api/v1/businesses",
+            json=_payload(
+                phone=["+972 522 723 686"],
+                website="vetasist.com.md",
+                instagram="https://instagram.com/zoomama",
+            ),
+            headers=HEADERS_A,
+        )
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["phone"] == ["+972 522 723 686"]
+        assert body["website"] == "https://vetasist.com.md"
+        assert body["instagram"] == "@zoomama"
+
+
+def test_bad_phone_and_website_are_rejected(client):
+    with patch.object(settings, "RAGLY_ADMIN_EMAILS", ""):
+        phone = client.post(
+            "/api/v1/businesses",
+            json=_payload(phone=["call me"]),
+            headers=HEADERS_A,
+        )
+        assert phone.status_code == 422
+        website = client.post(
+            "/api/v1/businesses",
+            json=_payload(website="javascript:alert(1)"),
+            headers=HEADERS_A,
+        )
+        assert website.status_code == 422
+
+
 def test_incomplete_listing_is_rejected(client):
     with patch.object(settings, "RAGLY_ADMIN_EMAILS", ""):
         response = client.post(
