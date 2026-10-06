@@ -788,6 +788,47 @@ def test_owner_review_is_saved_once_and_updates_the_rating(client, mock_db):
     assert body["reviews"][0]["is_mine"] is True
 
 
+def test_owner_can_delete_their_review_and_the_rating_clears(client, mock_db):
+    import asyncio
+
+    from bson import ObjectId
+
+    doc_id = ObjectId()
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": doc_id,
+                "name": "Zoomama",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "address": "Str. București 45",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {"mon": [{"open": "09:00", "close": "19:00"}]},
+            }
+        )
+    )
+    created = client.post(
+        f"/api/v1/businesses/{doc_id}/reviews",
+        headers=HEADERS_A,
+        json={"rating": 4, "comment": "Kind staff."},
+    )
+    assert created.status_code == 200, created.text
+
+    other = client.delete(f"/api/v1/businesses/{doc_id}/reviews", headers=HEADERS_B)
+    assert other.status_code == 404
+    assert mock_db.business_reviews._col.count_documents({"business_id": str(doc_id)}) == 1
+
+    deleted = client.delete(f"/api/v1/businesses/{doc_id}/reviews", headers=HEADERS_A)
+    assert deleted.status_code == 204
+    assert mock_db.business_reviews._col.count_documents({"business_id": str(doc_id)}) == 0
+
+    listed = client.get(f"/api/v1/businesses/{doc_id}", headers=HEADERS_A)
+    assert listed.status_code == 200
+    assert listed.json()["rating"] is None
+    assert listed.json()["reviews"] == []
+
+
 def test_reviews_page_is_fifteen_and_the_cursor_continues(client, mock_db):
     import asyncio
     from datetime import datetime, timedelta, timezone
@@ -840,3 +881,85 @@ def test_reviews_page_is_fifteen_and_the_cursor_continues(client, mock_db):
     rest = second.json()
     assert [item["comment"] for item in rest] == ["Review 0"]
     assert {item["id"] for item in page}.isdisjoint({item["id"] for item in rest})
+
+
+def test_report_emails_admins_the_review_author_and_reporter(client, mock_db):
+    import asyncio
+
+    from bson import ObjectId
+
+    doc_id = ObjectId()
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            {
+                "_id": doc_id,
+                "name": "Zoomama",
+                "category": "veterinarian",
+                "city": "Chișinău",
+                "status": "published",
+                "address": "Str. București 45",
+                "phone": ["+373 22 000 000"],
+                "website": "https://zoomama.example",
+                "timezone": "Europe/Chisinau",
+                "opening_hours": {"mon": [{"open": "09:00", "close": "19:00"}]},
+            }
+        )
+    )
+    asyncio.run(
+        mock_db.users.insert_one(
+            {
+                "firebase_uid": "uid_user_a",
+                "name": "Yoav",
+                "email": "yoav@example.com",
+                "phone": "+1 555 010 0101",
+            }
+        )
+    )
+    asyncio.run(
+        mock_db.users.insert_one(
+            {
+                "firebase_uid": "uid_user_b",
+                "name": "Mia",
+                "email": "mia@example.com",
+                "phone": "+1 555 010 0199",
+            }
+        )
+    )
+    created = client.post(
+        f"/api/v1/businesses/{doc_id}/reviews",
+        headers=HEADERS_A,
+        json={"rating": 2, "comment": "They ignored my dog."},
+    )
+    assert created.status_code == 200, created.text
+    review_id = created.json()["id"]
+
+    own = client.post(
+        f"/api/v1/businesses/{doc_id}/reviews/{review_id}/report",
+        headers=HEADERS_A,
+        json={"reason": "spam"},
+    )
+    assert own.status_code == 403
+
+    with patch("app.routers.businesses.send_review_report_email") as send:
+        with patch.object(settings, "RAGLY_ADMIN_EMAILS", "admin@ragly.cloud"):
+            reported = client.post(
+                f"/api/v1/businesses/{doc_id}/reviews/{review_id}/report",
+                headers=HEADERS_B,
+                json={"reason": "offensive"},
+            )
+    assert reported.status_code == 204, reported.text
+    assert mock_db.review_reports._col.count_documents({"review_id": review_id}) == 1
+    send.assert_called_once()
+    mailed = "\n".join(send.call_args.kwargs["lines"])
+    assert send.call_args.kwargs["subject"] == "Ragly: review report — Zoomama"
+    assert "Offensive or inappropriate (offensive)" in mailed
+    assert "They ignored my dog." in mailed
+    assert "Yoav" in mailed
+    assert "yoav@example.com" in mailed
+    assert "+1 555 010 0101" in mailed
+    assert "Mia" in mailed
+    assert "mia@example.com" in mailed
+    assert "+1 555 010 0199" in mailed
+    assert "Str. București 45" in mailed
+    assert review_id in mailed
+    assert send.call_args.args[0] == "admin@ragly.cloud"

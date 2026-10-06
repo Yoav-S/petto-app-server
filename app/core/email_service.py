@@ -3,6 +3,7 @@ email_service.py — Send OTP verification emails.
 
 Delivery order: Resend API → SMTP → log OTP to stdout (dev / until configured).
 """
+import html
 import logging
 import smtplib
 from email.message import EmailMessage
@@ -323,3 +324,41 @@ def send_otp_email(to_email: str, otp_code: str, locale: str | None = None) -> N
         normalize_email_locale(locale),
     )
     print(f"[DEV OTP] {to_email} -> {otp_code} (locale={normalize_email_locale(locale)})")
+
+
+def send_review_report_email(
+    to_email: str,
+    *,
+    subject: str,
+    lines: list[str],
+) -> None:
+    """Tell a Ragly admin that a pet owner reported a place review."""
+    text = "\n".join(lines)
+    body = "".join(
+        f"<p style=\"margin:0 0 8px\">{html.escape(line)}</p>" for line in lines
+    )
+    html_body = (
+        "<div style=\"font-family:Arial,Helvetica,sans-serif;color:#1F2937;"
+        "line-height:1.5;max-width:560px\">"
+        "<p style=\"margin:0 0 12px;font-size:16px\"><strong>Ragly</strong></p>"
+        f"{body}"
+        "</div>"
+    )
+    resend_key, resend_from, _source = resolve_resend_credentials()
+    if resend_key and resend_from:
+        _send_via_resend(to_email, subject, text, html_body, resend_key, resend_from)
+        logger.info("Review report email sent to %s", to_email)
+        return
+
+    from app.core.config import settings
+
+    if settings.smtp_configured:
+        _send_via_smtp(to_email, subject, text)
+        logger.info("Review report email sent via SMTP to %s", to_email)
+        return
+
+    logger.warning(
+        "Email not configured — review report would go to %s\n%s",
+        to_email,
+        text,
+    )

@@ -24,6 +24,7 @@ from app.core.email_service import (
     send_business_invite_email,
     send_business_owner_email,
     send_business_review_email,
+    send_review_report_email,
 )
 from app.core.errors import ErrorCode, raise_api_error
 from app.core.utils import doc_to_dict, is_valid_object_id
@@ -50,6 +51,7 @@ from app.models.business import (
     BusinessPlaceDetail,
     BusinessPlacePage,
     PlaceReview,
+    ReviewReportWrite,
     ReviewWrite,
     BusinessReject,
     BusinessSession,
@@ -990,6 +992,178 @@ async def write_business_review(
         created_at=created_at if isinstance(created_at, datetime) else now,
         is_mine=True,
     )
+
+
+@router.delete("/businesses/{business_id}/reviews", status_code=204)
+async def delete_business_review(
+    business_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Remove this user's review. Someone else's review stays."""
+    try:
+        oid = ObjectId(business_id)
+    except Exception:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    business = await db.businesses.find_one({"_id": oid, "status": "published"})
+    if not business:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    existing = await db.business_reviews.find_one(
+        {"business_id": business_id, "user_id": current_user["uid"]}
+    )
+    if not existing:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    await db.business_reviews.delete_one({"_id": existing["_id"]})
+
+
+_REPORT_REASON = {
+    "spam": "Spam or advertising",
+    "offensive": "Offensive or inappropriate",
+    "fake": "Fake or misleading",
+    "irrelevant": "Irrelevant",
+}
+
+
+def _shown(value: object) -> str:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(parts) if parts else "—"
+    if isinstance(value, datetime):
+        stamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return stamp.astimezone(timezone.utc).isoformat()
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if value is None:
+        return "—"
+    text = str(value).strip()
+    return text or "—"
+
+
+def _person_lines(title: str, uid: str, person: dict | None, fallback_email: str = "") -> list[str]:
+    person = person or {}
+    email = person.get("email") or fallback_email
+    return [
+        title,
+        f"User id: {_shown(uid)}",
+        f"Name: {_shown(person.get('name'))}",
+        f"Email: {_shown(email)}",
+        f"Phone: {_shown(person.get('phone'))}",
+        f"Photo: {_shown(person.get('photo_url'))}",
+        f"Sign-in: {_shown(person.get('auth_provider'))}",
+        f"Email verified: {_shown(person.get('email_verified')) if person else '—'}",
+    ]
+
+
+def _notify_review_report(lines: list[str], subject: str) -> None:
+    admins = sorted(settings.ragly_admin_emails)
+    if not admins:
+        logger.warning("No Ragly admin emails — review report was saved but not mailed\n%s", "\n".join(lines))
+        return
+    for admin_email in admins:
+        try:
+            send_review_report_email(admin_email, subject=subject, lines=lines)
+        except EmailDeliveryError:
+            logger.exception("Review report email failed for %s", admin_email)
+
+
+@router.post("/businesses/{business_id}/reviews/{review_id}/report", status_code=204)
+async def report_business_review(
+    business_id: str,
+    review_id: str,
+    body: ReviewReportWrite,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Email every Ragly admin the review, its author, and the person who reported it."""
+    try:
+        business_oid = ObjectId(business_id)
+        review_oid = ObjectId(review_id)
+    except Exception:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    business = await db.businesses.find_one({"_id": business_oid, "status": "published"})
+    if not business:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    review = await db.business_reviews.find_one(
+        {"_id": review_oid, "business_id": business_id}
+    )
+    if not review:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    reporter_uid = current_user["uid"]
+    author_uid = str(review.get("user_id") or "")
+    if not author_uid or author_uid == reporter_uid:
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+    people = await db.users.find(
+        {"firebase_uid": {"$in": [reporter_uid, author_uid]}}
+    ).to_list(None)
+    by_uid = {
+        str(person.get("firebase_uid")): person
+        for person in people
+        if person.get("firebase_uid")
+    }
+    now = datetime.now(timezone.utc)
+    reason_label = _REPORT_REASON[body.reason]
+    business_name = _text(business.get("name")) or "Business"
+    lines = [
+        "A pet owner reported a review.",
+        "",
+        "Report",
+        f"Reason: {reason_label} ({body.reason})",
+        f"Reported at: {_shown(now)}",
+        "",
+        "Business",
+        f"Business id: {business_id}",
+        f"Name: {_shown(business.get('name'))}",
+        f"Category: {_shown(business.get('category'))}",
+        f"Status: {_shown(business.get('status'))}",
+        f"City: {_shown(business.get('city'))}",
+        f"Address: {_shown(business.get('address'))}",
+        f"Phone: {_shown(business.get('phone'))}",
+        f"Website: {_shown(business.get('website'))}",
+        f"Instagram: {_shown(business.get('instagram'))}",
+        "",
+        "Review",
+        f"Review id: {review_id}",
+        f"Rating: {_shown(review.get('rating'))}",
+        f"Comment: {_shown(review.get('comment'))}",
+        f"Written at: {_shown(review.get('created_at'))}",
+        f"Updated at: {_shown(review.get('updated_at'))}",
+        "",
+        *_person_lines("Review author", author_uid, by_uid.get(author_uid)),
+        "",
+        *_person_lines(
+            "Reporter",
+            reporter_uid,
+            by_uid.get(reporter_uid),
+            fallback_email=str(current_user.get("email") or ""),
+        ),
+    ]
+    await db.review_reports.insert_one(
+        {
+            "business_id": business_id,
+            "review_id": review_id,
+            "reason": body.reason,
+            "reason_label": reason_label,
+            "created_at": now,
+            "business_name": business_name,
+            "review_rating": review.get("rating"),
+            "review_comment": review.get("comment"),
+            "review_created_at": review.get("created_at"),
+            "review_updated_at": review.get("updated_at"),
+            "author_uid": author_uid,
+            "author": {
+                "name": (by_uid.get(author_uid) or {}).get("name"),
+                "email": (by_uid.get(author_uid) or {}).get("email"),
+                "phone": (by_uid.get(author_uid) or {}).get("phone"),
+            },
+            "reporter_uid": reporter_uid,
+            "reporter": {
+                "name": (by_uid.get(reporter_uid) or {}).get("name"),
+                "email": (by_uid.get(reporter_uid) or {}).get("email") or current_user.get("email"),
+                "phone": (by_uid.get(reporter_uid) or {}).get("phone"),
+            },
+        }
+    )
+    _notify_review_report(lines, f"Ragly: review report — {business_name}")
 
 
 @router.post("/businesses", response_model=BusinessOut, status_code=201)
