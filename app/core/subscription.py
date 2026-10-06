@@ -9,6 +9,9 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 FREE_MAX_PETS = 1
 FREE_MAX_ACTIVE_REMINDERS = 50
 
+# This release has no paid plan. Pets and reminders are unlimited.
+LIMITS_ENABLED = False
+
 DEFAULT_SUBSCRIPTION: dict[str, Any] = {
     "plan": "free",
     "provider": None,
@@ -70,6 +73,8 @@ async def is_pet_locked_for_owner(
     user_doc: Optional[dict] = None,
 ) -> bool:
     """True when a free-plan owner cannot open this pet."""
+    if not LIMITS_ENABLED:
+        return False
     uid = pet.get("user_id")
     if not uid:
         return True
@@ -118,6 +123,8 @@ async def can_add_active_reminder(
     *,
     user_doc: Optional[dict] = None,
 ) -> bool:
+    if not LIMITS_ENABLED:
+        return True
     user = user_doc if user_doc is not None else await db.users.find_one({"firebase_uid": uid})
     if user_has_premium(user):
         return True

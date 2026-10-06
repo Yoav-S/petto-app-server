@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from app.core.database import get_database
 from app.core.errors import ErrorCode, raise_api_error
+from app.core import subscription as plans
 from app.core.subscription import (
     FREE_MAX_PETS,
     count_user_pets,
@@ -44,7 +45,11 @@ async def list_pets(
         .to_list(None)
     )
     user = await db.users.find_one({"firebase_uid": uid})
-    included_id = None if user_has_premium(user) else await get_included_pet_id(uid, db)
+    included_id = (
+        None
+        if not plans.LIMITS_ENABLED or user_has_premium(user)
+        else await get_included_pet_id(uid, db)
+    )
     out: list[PetOut] = []
     for d in docs:
         payload = doc_to_dict(d)
@@ -66,7 +71,7 @@ async def create_pet(
     """Create a new pet for the current user (onboarding + add pet)."""
     uid = current_user["uid"]
     user = await db.users.find_one({"firebase_uid": uid})
-    if not user_has_premium(user):
+    if plans.LIMITS_ENABLED and not user_has_premium(user):
         pet_count = await count_user_pets(uid, db)
         if pet_count >= FREE_MAX_PETS:
             raise_api_error(403, ErrorCode.PREMIUM_REQUIRED_PET)

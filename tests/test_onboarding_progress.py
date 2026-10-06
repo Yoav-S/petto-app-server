@@ -48,6 +48,17 @@ def test_onboarding_step_is_saved_and_returned(client, mock_db):
     assert again.json()["onboarding"]["pet_name"] == "Milo"
 
 
+def test_later_step_without_a_type_falls_back_to_type(client, mock_db):
+    _seed_user(mock_db)
+    saved = client.patch(
+        "/api/v1/users/me/onboarding",
+        headers=HEADERS_A,
+        json={"step": "name", "pet_name": "Milo", "pet_type": None},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["onboarding"]["step"] == "type"
+
+
 def test_later_step_without_a_name_falls_back_to_name(client, mock_db):
     _seed_user(mock_db)
     saved = client.patch(

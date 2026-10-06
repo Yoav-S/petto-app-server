@@ -1,7 +1,15 @@
 """Free-plan reminder cap and locked extra pets after a downgrade."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from tests.conftest import HEADERS_A, USER_A_UID, make_pet, make_reminder
+
+
+@pytest.fixture(autouse=True)
+def _subscription_limits_on(monkeypatch):
+    """These tests cover the cap. The shipped app leaves it off."""
+    monkeypatch.setattr("app.core.subscription.LIMITS_ENABLED", True)
 
 
 def _insert_extra_pet(mock_db, *, name: str = "Max") -> str:

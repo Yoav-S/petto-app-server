@@ -75,7 +75,7 @@ class EmailChangeConfirm(BaseModel):
 class OnboardingProgress(BaseModel):
     """In-progress first pet. Cleared once that pet is created."""
 
-    step: OnboardingStep = "name"
+    step: OnboardingStep = "type"
     pet_name: Optional[str] = Field(default=None, max_length=40)
     pet_type: Optional[PetKind] = None
     photo_url: Optional[str] = None
@@ -117,12 +117,15 @@ class OnboardingProgress(BaseModel):
 
 
 def coherent_onboarding(progress: OnboardingProgress) -> OnboardingProgress:
-    """A later step is only resumable when the earlier required answers exist."""
+    """A later step is only resumable when the earlier required answers exist.
+
+    The account name is collected first, so the first pet step is the type.
+    """
     step = progress.step
-    if step != "name" and not progress.pet_name:
-        step = "name"
-    elif step in ("photo", "birth") and not progress.pet_type:
+    if step != "type" and not progress.pet_type:
         step = "type"
+    elif step in ("photo", "birth") and not progress.pet_name:
+        step = "name"
     if step == progress.step:
         return progress
     return progress.model_copy(update={"step": step})
