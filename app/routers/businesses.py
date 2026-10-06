@@ -40,6 +40,7 @@ from app.locations import (
 )
 from app.middleware.auth import get_current_user
 from app.models.business import (
+    AdminApprove,
     AdminPublish,
     BusinessCounts,
     BusinessMembership,
@@ -244,6 +245,8 @@ def _to_out(doc: dict) -> BusinessOut:
         instagram=_text(data.get("instagram")),
         rejection_reason=_text(data.get("rejection_reason")),
         field_errors=_field_errors(doc),
+        admin_notes=_field_errors({"field_errors": doc.get("admin_notes")}),
+        reviewed_at=data.get("reviewed_at"),
         created_at=data.get("created_at"),
         updated_at=data.get("updated_at"),
         submitted_at=data.get("submitted_at"),
@@ -1010,6 +1013,7 @@ async def submit_business(
         "status": "pending_review",
         "rejection_reason": None,
         "field_errors": {},
+        "admin_notes": {},
         "submitted_at": now,
         "updated_at": now,
     }
@@ -1236,10 +1240,11 @@ async def approve_location(
     now = datetime.now(timezone.utc)
     await db.business_locations.update_one(
         {"_id": row["_id"]},
-        {"$set": {"status": "published", "rejection_reason": None, "updated_at": now}},
+        {"$set": {"status": "published", "rejection_reason": None, "reviewed_at": now, "updated_at": now}},
     )
     row["status"] = "published"
     row["rejection_reason"] = None
+    row["reviewed_at"] = now
     return location_out(row)
 
 
@@ -1695,6 +1700,7 @@ async def owner_update_business(
     if business.get("status") == "rejected":
         fields["status"] = "pending_review"
         fields["field_errors"] = {}
+        fields["admin_notes"] = {}
         fields["rejection_reason"] = None
         fields["submitted_at"] = now
     unset = {"phones": "", "latitude": "", "longitude": "", "photo_url": ""}
@@ -1714,10 +1720,14 @@ async def owner_update_business(
 @router.post("/admin/businesses/{business_id}/approve", response_model=BusinessOut)
 async def approve_business(
     business_id: str,
+    body: AdminApprove | None = None,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Publish the listing and make the submitter its Owner."""
+    """Publish the listing and make the submitter its Owner.
+
+    Notes are optional. The owner sees them on the published business.
+    """
     admin_email = _require_admin(current_user)
     if not ObjectId.is_valid(business_id):
         raise_api_error(404, ErrorCode.NOT_FOUND)
@@ -1727,6 +1737,7 @@ async def approve_business(
     if doc.get("status") != "pending_review":
         raise_api_error(400, ErrorCode.BUSINESS_NOT_PENDING)
     now = datetime.now(timezone.utc)
+    notes = body.field_notes if body else {}
     await db.businesses.update_one(
         {"_id": doc["_id"]},
         {
@@ -1734,6 +1745,7 @@ async def approve_business(
                 "status": "published",
                 "rejection_reason": None,
                 "field_errors": {},
+                "admin_notes": notes,
                 "reviewed_at": now,
                 "reviewed_by": admin_email,
                 "updated_at": now,
@@ -1757,12 +1769,15 @@ async def approve_business(
     doc["status"] = "published"
     doc["rejection_reason"] = None
     doc["field_errors"] = {}
+    doc["admin_notes"] = notes
+    doc["reviewed_at"] = now
     doc["updated_at"] = now
     _email_owner(
         doc.get("owner_email"),
         business_name=doc.get("name") or "",
         subject=f"Ragly: {doc.get('name') or 'Your business'} is published",
         intro=f"{doc.get('name') or 'Your business'} is published. Pet owners can find it in the app.",
+        lines=[f"{key}: {message}" for key, message in notes.items()] or None,
     )
     return _to_out(doc)
 
@@ -1792,6 +1807,7 @@ async def reject_business(
                 "status": "rejected",
                 "rejection_reason": summary,
                 "field_errors": body.field_errors,
+                "admin_notes": body.field_errors,
                 "reviewed_at": now,
                 "reviewed_by": admin_email,
                 "updated_at": now,
@@ -1801,6 +1817,8 @@ async def reject_business(
     doc["status"] = "rejected"
     doc["rejection_reason"] = summary
     doc["field_errors"] = body.field_errors
+    doc["admin_notes"] = body.field_errors
+    doc["reviewed_at"] = now
     doc["updated_at"] = now
     _email_owner(
         doc.get("owner_email"),

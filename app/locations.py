@@ -77,6 +77,7 @@ def location_out(doc: dict) -> LocationOut:
         phone=_phones(doc.get("phone")),
         status=location_status(doc),
         rejection_reason=reason or None,
+        reviewed_at=data.get("reviewed_at"),
     )
 
 

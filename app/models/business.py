@@ -108,22 +108,38 @@ _REVIEW_FIELDS = frozenset(
 )
 
 
+def _clean_notes(value: dict[str, str]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key, message in value.items():
+        if key not in _REVIEW_FIELDS:
+            continue
+        text = message.strip()
+        if text:
+            cleaned[key] = text[:500]
+    return cleaned
+
+
 class BusinessReject(BaseModel):
     field_errors: dict[str, str]
 
     @field_validator("field_errors")
     @classmethod
     def notes_present(cls, value: dict[str, str]) -> dict[str, str]:
-        cleaned: dict[str, str] = {}
-        for key, message in value.items():
-            if key not in _REVIEW_FIELDS:
-                continue
-            text = message.strip()
-            if text:
-                cleaned[key] = text[:500]
+        cleaned = _clean_notes(value)
         if not cleaned:
             raise ValueError("field_errors")
         return cleaned
+
+
+class AdminApprove(BaseModel):
+    """Optional notes the owner still sees after the business is published."""
+
+    field_notes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("field_notes")
+    @classmethod
+    def notes_clean(cls, value: dict[str, str]) -> dict[str, str]:
+        return _clean_notes(value)
 
 
 class AdminPublish(BusinessSubmit):
@@ -168,6 +184,7 @@ class LocationOut(LocationWrite):
     business_id: str
     status: Literal["pending_review", "published", "rejected"] = "published"
     rejection_reason: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
 
 
 class StoreReview(BaseModel):
@@ -246,6 +263,8 @@ class BusinessOut(BaseModel):
     instagram: Optional[str] = None
     rejection_reason: Optional[str] = None
     field_errors: dict[str, str] = Field(default_factory=dict)
+    admin_notes: dict[str, str] = Field(default_factory=dict)
+    reviewed_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None

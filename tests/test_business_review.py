@@ -173,6 +173,28 @@ def test_admin_reject_stores_reason(client):
             assert rejected.status_code == 200
             assert rejected.json()["status"] == "rejected"
             assert rejected.json()["field_errors"]["address"] == "This address is not in Chișinău."
+            assert rejected.json()["admin_notes"]["address"] == "This address is not in Chișinău."
+
+
+def test_approve_keeps_notes_for_the_owner(client):
+    with patch("app.routers.businesses.send_business_review_email"):
+        with patch("app.routers.businesses.send_business_owner_email"):
+            with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+                created = client.post(
+                    "/api/v1/businesses", json=_payload(), headers=HEADERS_A
+                )
+                business_id = created.json()["id"]
+                approved = client.post(
+                    f"/api/v1/admin/businesses/{business_id}/approve",
+                    json={"field_notes": {"website": "A website would help pet owners find you."}},
+                    headers=HEADERS_B,
+                )
+                assert approved.status_code == 200, approved.text
+                body = approved.json()
+                assert body["status"] == "published"
+                assert body["field_errors"] == {}
+                assert body["admin_notes"]["website"] == "A website would help pet owners find you."
+                assert body["reviewed_at"]
 
 
 def test_manual_clinic_document_lists_and_updates(client, mock_db):
