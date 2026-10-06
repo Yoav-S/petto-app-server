@@ -88,7 +88,7 @@ def test_plain_website_phone_and_instagram_are_accepted(client):
         created = client.post(
             "/api/v1/businesses",
             json=_payload(
-                phone=["+972 522 723 686"],
+                phone=["+1 555 010 0199"],
                 website="vetasist.com.md",
                 instagram="https://instagram.com/zoomama",
             ),
@@ -96,7 +96,7 @@ def test_plain_website_phone_and_instagram_are_accepted(client):
         )
         assert created.status_code == 201, created.text
         body = created.json()
-        assert body["phone"] == ["+972 522 723 686"]
+        assert body["phone"] == ["+1 555 010 0199"]
         assert body["website"] == "https://vetasist.com.md"
         assert body["instagram"] == "@zoomama"
 
