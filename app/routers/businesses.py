@@ -1055,11 +1055,14 @@ def _person_lines(title: str, uid: str, person: dict | None, fallback_email: str
 
 
 def _notify_review_report(lines: list[str], subject: str) -> None:
-    admins = sorted(settings.ragly_admin_emails)
-    if not admins:
-        logger.warning("No Ragly admin emails — review report was saved but not mailed\n%s", "\n".join(lines))
+    recipients = set(settings.ragly_admin_emails)
+    support = settings.SUPPORT_EMAIL.strip().lower()
+    if support:
+        recipients.add(support)
+    if not recipients:
+        logger.warning("No support email — review report was saved but not mailed\n%s", "\n".join(lines))
         return
-    for admin_email in admins:
+    for admin_email in sorted(recipients):
         try:
             send_review_report_email(admin_email, subject=subject, lines=lines)
         except EmailDeliveryError:
@@ -1137,7 +1140,7 @@ async def report_business_review(
             fallback_email=str(current_user.get("email") or ""),
         ),
     ]
-    await db.review_reports.insert_one(
+    result = await db.review_reports.insert_one(
         {
             "business_id": business_id,
             "review_id": review_id,
@@ -1163,6 +1166,7 @@ async def report_business_review(
             },
         }
     )
+    lines.extend(["", f"Report id: {result.inserted_id}"])
     _notify_review_report(lines, f"Ragly: review report — {business_name}")
 
 

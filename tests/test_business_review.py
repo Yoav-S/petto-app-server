@@ -941,7 +941,9 @@ def test_report_emails_admins_the_review_author_and_reporter(client, mock_db):
     assert own.status_code == 403
 
     with patch("app.routers.businesses.send_review_report_email") as send:
-        with patch.object(settings, "RAGLY_ADMIN_EMAILS", "admin@ragly.cloud"):
+        with patch.object(settings, "RAGLY_ADMIN_EMAILS", "admin@ragly.cloud"), patch.object(
+            settings, "SUPPORT_EMAIL", "pettoservices@gmail.com"
+        ):
             reported = client.post(
                 f"/api/v1/businesses/{doc_id}/reviews/{review_id}/report",
                 headers=HEADERS_B,
@@ -949,7 +951,8 @@ def test_report_emails_admins_the_review_author_and_reporter(client, mock_db):
             )
     assert reported.status_code == 204, reported.text
     assert mock_db.review_reports._col.count_documents({"review_id": review_id}) == 1
-    send.assert_called_once()
+    recipients = {call.args[0] for call in send.call_args_list}
+    assert recipients == {"admin@ragly.cloud", "pettoservices@gmail.com"}
     mailed = "\n".join(send.call_args.kwargs["lines"])
     assert send.call_args.kwargs["subject"] == "Ragly: review report — Zoomama"
     assert "Offensive or inappropriate (offensive)" in mailed
@@ -962,4 +965,4 @@ def test_report_emails_admins_the_review_author_and_reporter(client, mock_db):
     assert "+1 555 010 0199" in mailed
     assert "Str. București 45" in mailed
     assert review_id in mailed
-    assert send.call_args.args[0] == "admin@ragly.cloud"
+    assert "Report id:" in mailed

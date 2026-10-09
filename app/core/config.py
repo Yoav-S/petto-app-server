@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     # Comma-separated Ragly admin emails. These accounts see the review panel.
     # Anyone not on this list gets the business dashboard.
     RAGLY_ADMIN_EMAILS: str = ""
+    # Review reports are mailed here, in addition to the admin list.
+    SUPPORT_EMAIL: str = "pettoservices@gmail.com"
     # Link included in the new-request email.
     BUSINESS_APP_URL: str = "https://business.ragly.cloud"
     
