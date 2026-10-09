@@ -5,7 +5,7 @@ Key design decisions (from screen analysis):
   - `type` field: DROPPED. Reminders use free-text `title` only.
   - Optional `category` for UI icons (general / medication / …).
   - `repeat` enum matches exactly the options shown in the Figma repeat picker.
-  - `time` is stored separately from `date` as "HH:MM" string.
+  - `time` is stored separately from `date` as "HH:MM" or "HH:MM:SS".
   - `status` returned by API is server-computed; stored_status in DB is
     one of: "scheduled" | "completed" | "missed".
     The API returns the richer set: "today" | "scheduled" | "missed" | "completed".
@@ -49,7 +49,7 @@ ReminderAlert = Literal[
 class ReminderCreate(BaseModel):
     title: str = Field(..., max_length=300)
     date: str                                     # start date "YYYY-MM-DD"
-    time: str = Field(..., pattern=r"^\d{2}:\d{2}$")  # "HH:MM"
+    time: str = Field(..., pattern=r"^\d{2}:\d{2}(:\d{2})?$")  # "HH:MM" or "HH:MM:SS"
     repeat: ReminderRepeat = "off"
     end_date: Optional[str] = None                # optional end "YYYY-MM-DD"
     alert: ReminderAlert = "off"
@@ -60,7 +60,7 @@ class ReminderCreate(BaseModel):
 class ReminderUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=300)
     date: Optional[str] = None
-    time: Optional[str] = Field(None, pattern=r"^\d{2}:\d{2}$")
+    time: Optional[str] = Field(None, pattern=r"^\d{2}:\d{2}(:\d{2})?$")
     repeat: Optional[ReminderRepeat] = None
     end_date: Optional[str] = None
     alert: Optional[ReminderAlert] = None

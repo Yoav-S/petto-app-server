@@ -59,12 +59,16 @@ def compute_scheduled_at(date_str: str, time_str: str, tz_name: str | None) -> d
     the whole dispatcher).
     """
     try:
-        hour, minute = (int(p) for p in time_str.split(":"))
+        parts = time_str.split(":")
+        if len(parts) not in (2, 3):
+            return None
+        hour, minute = int(parts[0]), int(parts[1])
+        second = int(parts[2]) if len(parts) == 3 else 0
         year, month, day = (int(p) for p in date_str.split("-"))
     except (ValueError, AttributeError):
         return None
     tz = resolve_timezone(tz_name)
-    local_dt = datetime(year, month, day, hour, minute, tzinfo=tz)
+    local_dt = datetime(year, month, day, hour, minute, second, tzinfo=tz)
     return local_dt.astimezone(timezone.utc)
 
 
