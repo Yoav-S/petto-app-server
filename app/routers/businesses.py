@@ -715,22 +715,29 @@ async def nearby_businesses(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """One card per business. With coordinates, the card is the closest branch."""
+    """One card per business. With coordinates, the card is the closest branch.
+
+    The response is one page (`limit` / `offset`). Matching businesses are ranked
+    first, then sliced, so a category of any size keeps paging instead of stopping
+    at a fixed cap.
+    """
     del current_user
-    docs = await db.businesses.find({"status": "published"}).to_list(500)
+    allowed_category = {
+        "veterinarian",
+        "groomer",
+        "pharmacy",
+        "pet_friendly",
+        "pet_store",
+    }
+    if category and category not in allowed_category:
+        return BusinessPlacePage(items=[], has_more=False)
+    query: dict = {"status": "published", "category": category or {"$in": list(allowed_category)}}
+    docs = await db.businesses.find(query).to_list(None)
     located = await locations_for(db, [str(doc["_id"]) for doc in docs])
     places: list[BusinessPlace] = []
     for doc in docs:
         data = doc_to_dict(doc)
-        if data.get("category") not in {
-            "veterinarian",
-            "groomer",
-            "pharmacy",
-            "pet_friendly",
-            "pet_store",
-        }:
-            continue
-        if category and data.get("category") != category:
+        if data.get("category") not in allowed_category:
             continue
         branches = public_locations(located.get(data["id"]) or await ensure_locations(db, doc))
         chosen = doc
@@ -762,17 +769,17 @@ async def nearby_businesses(
                 **schedule,
             )
         )
-    ratings = await _ratings(db, [place.id for place in places])
-    if ratings:
-        places = [
-            place.model_copy(update={"rating": ratings.get(place.id)})
-            for place in places
-        ]
     if not anywhere and latitude is not None and longitude is not None:
         places.sort(key=lambda place: (place.distance_km is None, place.distance_km or 0))
     else:
         places.sort(key=lambda place: place.name.lower())
     page = places[offset:offset + limit]
+    ratings = await _ratings(db, [place.id for place in page])
+    if ratings:
+        page = [
+            place.model_copy(update={"rating": ratings.get(place.id)})
+            for place in page
+        ]
     return BusinessPlacePage(items=page, has_more=offset + limit < len(places))
 
 
