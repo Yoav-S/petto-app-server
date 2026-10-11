@@ -711,6 +711,7 @@ async def nearby_businesses(
     limit: int = Query(default=15, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
     anywhere: bool = Query(default=False),
+    category: str | None = None,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
@@ -728,6 +729,8 @@ async def nearby_businesses(
             "pet_friendly",
             "pet_store",
         }:
+            continue
+        if category and data.get("category") != category:
             continue
         branches = public_locations(located.get(data["id"]) or await ensure_locations(db, doc))
         chosen = doc
