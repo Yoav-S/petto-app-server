@@ -351,7 +351,7 @@ async def delete_me(
     Removal order (data first, auth last so a failure never strands the user
     with an un-loginable account and lingering data):
       1. health_notes -> medical_records -> vaccinations -> reminders -> pets
-      2. push_tokens, email_otps, user document
+      2. reviews, push_tokens, email_otps, user document
       3. Storage objects under users/{uid}/ (best effort)
       4. Firebase Authentication user
     """
@@ -376,7 +376,8 @@ async def delete_me(
         await db.reminders.delete_many({"pet_id": {"$in": pet_ids}})
         await db.pets.delete_many({"user_id": uid})
 
-    # 2. User-scoped data.
+    # 2. User-scoped data. Reviews are stored apart from the user document.
+    await db.business_reviews.delete_many({"user_id": uid})
     await db.push_tokens.delete_many({"user_id": uid})
     if email:
         await db.email_otps.delete_many({"email": email})
