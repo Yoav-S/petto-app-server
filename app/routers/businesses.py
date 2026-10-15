@@ -17,6 +17,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.config import settings
+from app.country import country_code
 from app.core.database import get_database
 from app.core.firebase import delete_business_image, delete_business_images, upload_business_image
 from app.core.email_service import (
@@ -493,6 +494,18 @@ async def _sync_primary_location(db: AsyncIOMotorDatabase, business: dict) -> No
     await db.business_locations.update_one({"_id": rows[0]["_id"]}, {"$set": mirrored})
 
 
+def _point_lat_lng(point: dict | None) -> tuple[float, float] | None:
+    if not point:
+        return None
+    coords = point.get("coordinates")
+    if not isinstance(coords, list) or len(coords) != 2:
+        return None
+    try:
+        return float(coords[1]), float(coords[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _distance_between(
     latitude: float | None,
     longitude: float | None,
@@ -734,25 +747,41 @@ async def nearby_businesses(
     query: dict = {"status": "published", "category": category or {"$in": list(allowed_category)}}
     docs = await db.businesses.find(query).to_list(None)
     located = await locations_for(db, [str(doc["_id"]) for doc in docs])
+    user_country = None
+    if not anywhere and latitude is not None and longitude is not None:
+        user_country = country_code(latitude, longitude)
     places: list[BusinessPlace] = []
     for doc in docs:
         data = doc_to_dict(doc)
         if data.get("category") not in allowed_category:
             continue
         branches = public_locations(located.get(data["id"]) or await ensure_locations(db, doc))
-        chosen = doc
-        chosen_point = _location(doc)
+        candidates: list[tuple[dict, dict | None]] = []
+        if branches:
+            for branch in branches:
+                point = branch.get("location") if isinstance(branch.get("location"), dict) else None
+                candidates.append((branch, point))
+        else:
+            candidates.append((doc, _location(doc)))
+        visible: list[tuple[dict, dict | None]] = []
+        for item, point in candidates:
+            if user_country is None:
+                visible.append((item, point))
+                continue
+            pair = _point_lat_lng(point)
+            if pair is None or country_code(pair[0], pair[1]) != user_country:
+                continue
+            visible.append((item, point))
+        if not visible:
+            continue
+        chosen, chosen_point = visible[0]
         distance = _distance_between(latitude, longitude, chosen_point)
-        for branch in branches:
-            point = branch.get("location") if isinstance(branch.get("location"), dict) else None
+        for item, point in visible[1:]:
             branch_distance = _distance_between(latitude, longitude, point)
             if branch_distance is None:
-                if chosen_point is None and point:
-                    chosen = branch
-                    chosen_point = point
                 continue
             if distance is None or branch_distance < distance:
-                chosen = branch
+                chosen = item
                 chosen_point = point
                 distance = branch_distance
         schedule = _schedule(chosen if chosen.get("opening_hours") else doc)
@@ -765,7 +794,7 @@ async def nearby_businesses(
                 image=_place_image(doc),
                 distance_km=distance,
                 address=_text(chosen.get("address")) or _text(data.get("address")) or "",
-                location_count=max(len(branches), 1),
+                location_count=max(len(visible), 1),
                 **schedule,
             )
         )
@@ -878,6 +907,17 @@ async def business_place(
         raise_api_error(404, ErrorCode.NOT_FOUND)
     data = doc_to_dict(doc)
     branches = public_locations(await ensure_locations(db, doc))
+    if latitude is not None and longitude is not None:
+        user_country = country_code(latitude, longitude)
+        if user_country is not None:
+            in_country = []
+            for branch in branches:
+                point = branch.get("location") if isinstance(branch.get("location"), dict) else None
+                pair = _point_lat_lng(point)
+                if pair is not None and country_code(pair[0], pair[1]) == user_country:
+                    in_country.append(branch)
+            if in_country:
+                branches = in_country
     business_phone = _phones(doc)
     public_branches = []
     closest = None

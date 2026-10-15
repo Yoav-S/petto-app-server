@@ -167,3 +167,33 @@ def test_owner_sees_every_business_and_can_add_a_store(client, mock_db):
     assert visible.status_code == 200, visible.text
     shown = next(item for item in visible.json()["items"] if item["name"] == "Zoomama")
     assert shown["location_count"] == 2
+
+
+def test_nearby_keeps_other_cities_in_the_same_country_only(client, mock_db):
+    """Chisinau can see Balti. It cannot see Amman, however close the border is."""
+    async def seed():
+        await mock_db.businesses.insert_one(
+            _business("Balti Vet", ["+373 231 000"], "Str. Stefan 1", 27.91, 47.75)
+        )
+        await mock_db.businesses.insert_one(
+            _business("Amman Vet", ["+962 6 000 0000"], "Rainbow St", 35.93, 31.95)
+        )
+
+    asyncio.run(seed())
+    nearby = client.get(
+        "/api/v1/businesses/nearby",
+        headers=HEADERS_A,
+        params={"latitude": 47.01, "longitude": 28.86, "limit": 50},
+    )
+    assert nearby.status_code == 200, nearby.text
+    names = [item["name"] for item in nearby.json()["items"]]
+    assert names == ["Balti Vet"]
+    assert nearby.json()["items"][0]["distance_km"] > 0
+
+    israel = client.get(
+        "/api/v1/businesses/nearby",
+        headers=HEADERS_A,
+        params={"latitude": 32.08, "longitude": 34.78, "limit": 50},
+    )
+    assert israel.status_code == 200, israel.text
+    assert israel.json()["items"] == []
