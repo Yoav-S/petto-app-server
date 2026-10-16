@@ -812,6 +812,13 @@ async def nearby_businesses(
     return BusinessPlacePage(items=page, has_more=offset + limit < len(places))
 
 
+def _utc(value: datetime) -> datetime:
+    """Mongo stores UTC without tzinfo. Naive datetimes serialize without Z and phones read them as local."""
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 REVIEW_PAGE_SIZE = 15
 
 
@@ -872,7 +879,7 @@ async def _place_reviews(
                 author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
                 rating=rating,
                 comment=_text(row.get("comment")),
-                created_at=created_at,
+                created_at=_utc(created_at),
                 is_mine=str(row.get("user_id") or "") == uid,
             )
         )
@@ -1016,7 +1023,8 @@ async def write_business_review(
             {"_id": existing["_id"]},
             {"$set": {"rating": body.rating, "comment": body.comment, "updated_at": now}},
         )
-        created_at = existing.get("created_at") or now
+        stored = existing.get("created_at")
+        created_at = stored if isinstance(stored, datetime) else now
         review_id = existing["_id"]
     else:
         created_at = now
@@ -1039,7 +1047,7 @@ async def write_business_review(
         author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
         rating=body.rating,
         comment=body.comment,
-        created_at=created_at if isinstance(created_at, datetime) else now,
+        created_at=_utc(created_at if isinstance(created_at, datetime) else now),
         is_mine=True,
     )
 
