@@ -43,6 +43,9 @@ class GeoLocation(BaseModel):
 
 
 class OpeningHours(BaseModel):
+    """`provided` is false when the business has no hours to publish."""
+
+    provided: bool = True
     always_open: bool = False
     mon: list[TimeSlot] = Field(default_factory=list)
     tue: list[TimeSlot] = Field(default_factory=list)
@@ -309,7 +312,7 @@ class BusinessPlace(BaseModel):
     image: Optional[str] = None
     distance_km: Optional[float] = None
     rating: Optional[float] = None
-    open_now: bool = False
+    open_now: Optional[bool] = None
     open_24_7: bool = False
     closes_at: Optional[str] = None
     opens_at: Optional[str] = None

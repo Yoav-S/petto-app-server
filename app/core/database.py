@@ -66,6 +66,7 @@ async def connect_to_db() -> None:
     if owner_index is None:
         await _db.businesses.create_index("owner_uid")
     await _db.businesses.create_index("status")
+    await _ensure_business_name_index(_db)
     member_indexes = await _db.business_members.index_information()
     if "business_id_1_user_id_1" in member_indexes:
         await _db.business_members.drop_index("business_id_1_user_id_1")
@@ -110,6 +111,27 @@ async def _ensure_reminder_series_date_index(db) -> None:
         logger.exception(
             "Could not create unique series_id+date index; continuing startup"
         )
+
+
+async def _ensure_business_name_index(db) -> None:
+    """One registered name. An older duplicate keeps a suffixed key so the index can be created."""
+    from app.business_names import business_name_key
+
+    seen: dict[str, object] = {}
+    cursor = db.businesses.find({}, {"name": 1, "name_key": 1})
+    async for doc in cursor:
+        key = business_name_key(str(doc.get("name") or "")) or f"unnamed-{doc['_id']}"
+        if key in seen and seen[key] != doc["_id"]:
+            logger.warning("Duplicate business name left in place for %s", doc["_id"])
+            key = f"{key}#{doc['_id']}"
+        else:
+            seen[key] = doc["_id"]
+        if doc.get("name_key") != key:
+            await db.businesses.update_one({"_id": doc["_id"]}, {"$set": {"name_key": key}})
+    try:
+        await db.businesses.create_index("name_key", unique=True, name="business_name_key")
+    except Exception:
+        logger.exception("Could not create unique business name index; continuing startup")
 
 
 async def close_db_connection() -> None:

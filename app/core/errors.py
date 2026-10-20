@@ -37,6 +37,7 @@ class ErrorCode(StrEnum):
     VACCINATION_VALID_UNTIL_BEFORE_DATE = "vaccination_valid_until_before_date"
     BUSINESS_INCOMPLETE = "business_incomplete"
     BUSINESS_NOT_PENDING = "business_not_pending"
+    BUSINESS_NAME_TAKEN = "business_name_taken"
 
 
 def raise_api_error(

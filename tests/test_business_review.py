@@ -966,3 +966,52 @@ def test_report_emails_admins_the_review_author_and_reporter(client, mock_db):
     assert "Str. București 45" in mailed
     assert review_id in mailed
     assert "Report id:" in mailed
+
+
+def test_registered_business_name_cannot_be_used_again(client):
+    with patch("app.routers.businesses.send_business_review_email"):
+        with patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com"):
+            first = client.post(
+                "/api/v1/businesses",
+                json=_payload(name="Zoomama"),
+                headers=HEADERS_A,
+            )
+            assert first.status_code == 201, first.text
+            again = client.post(
+                "/api/v1/businesses",
+                json=_payload(name="  zoomama "),
+                headers=HEADERS_A,
+            )
+            assert again.status_code == 409
+            assert again.json()["detail"]["code"] == "business_name_taken"
+            published = client.post(
+                "/api/v1/admin/businesses",
+                json=_payload(name="ZOOMAMA"),
+                headers=HEADERS_B,
+            )
+            assert published.status_code == 409
+            kept = client.patch(
+                f"/api/v1/admin/businesses/{first.json()['id']}",
+                json=_payload(name="Zoomama"),
+                headers=HEADERS_B,
+            )
+            assert kept.status_code == 200, kept.text
+
+
+def test_opening_hours_can_be_omitted(client):
+    with patch("app.routers.businesses.send_business_review_email"):
+        with patch.object(settings, "RAGLY_ADMIN_EMAILS", ""):
+            created = client.post(
+                "/api/v1/businesses",
+                json=_payload(
+                    name="No Hours Groomer",
+                    category="groomer",
+                    opening_hours={"provided": False},
+                ),
+                headers=HEADERS_A,
+            )
+            assert created.status_code == 201, created.text
+            hours = created.json()["opening_hours"]
+            assert hours["provided"] is False
+            assert hours["mon"] == []
+            assert hours["sun"] == []

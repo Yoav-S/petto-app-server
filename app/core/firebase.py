@@ -148,13 +148,9 @@ def upload_business_image(business_id: str, content: bytes, content_type: str) -
     """
     from firebase_admin import storage
 
-    extensions = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-        "image/gif": ".gif",
-    }
-    extension = extensions.get(content_type)
+    from app.images import IMAGE_EXTENSIONS
+
+    extension = IMAGE_EXTENSIONS.get(content_type)
     bucket_name = settings.firebase_storage_bucket
     if not extension or not bucket_name or _app is None:
         raise RuntimeError("Business image storage is not available")

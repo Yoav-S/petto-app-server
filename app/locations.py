@@ -10,8 +10,12 @@ from app.models.business import LocationOut, LocationWrite, OpeningHours, PlaceL
 
 def _hours(raw: object) -> dict:
     source = raw if isinstance(raw, dict) else {}
-    hours: dict = {"always_open": bool(source.get("always_open", False))}
-    for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun"):
+    days = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    provided = bool(source["provided"]) if "provided" in source else True
+    if not provided:
+        return {"provided": False, "always_open": False, **{day: [] for day in days}}
+    hours: dict = {"provided": True, "always_open": bool(source.get("always_open", False))}
+    for day in days:
         slots = []
         for slot in source.get(day) or []:
             if isinstance(slot, dict) and slot.get("open") and slot.get("close"):

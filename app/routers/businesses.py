@@ -12,12 +12,15 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from app.business_names import business_name_key
 from app.core.config import settings
 from app.country import country_code
+from app.images import identify_image
 from app.core.database import get_database
 from app.core.firebase import delete_business_image, delete_business_images, upload_business_image
 from app.core.email_service import (
@@ -76,7 +79,6 @@ _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _MAX_PHOTOS = 6
 _MAX_PHOTO_BYTES = 5 * 1024 * 1024
-_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
 def _require_admin(current_user: dict) -> str:
@@ -94,10 +96,15 @@ def _clean_optional(value: str | None) -> str | None:
 
 
 def _validate_hours(hours: OpeningHours) -> dict:
-    """Store only the seven days. An empty day is closed. No always_open flag."""
+    """Store the seven days. Hours can be omitted. An empty listed day is closed."""
+    if not hours.provided:
+        return {"provided": False, "always_open": False, **{day: [] for day in _DAYS}}
     if hours.always_open:
-        return {day: [{"open": "00:00", "close": "23:59"}] for day in _DAYS}
-    stored: dict = {}
+        stored = {day: [{"open": "00:00", "close": "23:59"}] for day in _DAYS}
+        stored["provided"] = True
+        stored["always_open"] = False
+        return stored
+    stored = {"provided": True, "always_open": False}
     for day in _DAYS:
         slots = []
         for slot in getattr(hours, day):
@@ -134,6 +141,7 @@ def _public_fields(body: BusinessSubmit) -> dict:
     longitude, latitude = body.location.coordinates
     fields = {
         "name": body.name.strip(),
+        "name_key": business_name_key(body.name),
         "phone": body.phone,
         "email": _clean_optional(body.email),
         "description": _clean_optional(body.description),
@@ -179,7 +187,10 @@ def _location(doc: dict) -> dict | None:
 
 def _hours(doc: dict) -> dict:
     raw = doc.get("opening_hours") if isinstance(doc.get("opening_hours"), dict) else {}
-    hours: dict = {"always_open": bool(raw.get("always_open", False))}
+    provided = bool(raw["provided"]) if "provided" in raw else True
+    if not provided:
+        return {"provided": False, "always_open": False, **{day: [] for day in _DAYS}}
+    hours: dict = {"provided": True, "always_open": bool(raw.get("always_open", False))}
     for day in _DAYS:
         slots = []
         for slot in raw.get(day) or []:
@@ -187,6 +198,24 @@ def _hours(doc: dict) -> dict:
                 slots.append({"open": str(slot["open"]), "close": str(slot["close"])})
         hours[day] = slots
     return hours
+
+
+async def _ensure_unique_name(db: AsyncIOMotorDatabase, name: str, except_id=None) -> None:
+    """Reject a name that already belongs to another business, including a pending one."""
+    key = business_name_key(name)
+    if not key:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    query: dict = {"name_key": key}
+    if except_id is not None:
+        query["_id"] = {"$ne": except_id}
+    if await db.businesses.find_one(query):
+        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
+    legacy_query: dict = {"name_key": {"$exists": False}}
+    if except_id is not None:
+        legacy_query["_id"] = {"$ne": except_id}
+    for doc in await db.businesses.find(legacy_query, {"name": 1}).to_list(None):
+        if business_name_key(str(doc.get("name") or "")) == key:
+            raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
 
 
 def _field_errors(doc: dict) -> dict[str, str]:
@@ -385,10 +414,11 @@ async def _add_business_photo(
     business: dict,
     file: UploadFile,
 ) -> BusinessOut:
-    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
     content = await file.read(_MAX_PHOTO_BYTES + 1)
-    if content_type not in _IMAGE_TYPES or not content or len(content) > _MAX_PHOTO_BYTES:
+    identified = identify_image(content) if content and len(content) <= _MAX_PHOTO_BYTES else None
+    if identified is None:
         raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    content_type = identified[0]
     photos = _gallery(business)
     if len(photos) >= _MAX_PHOTOS:
         raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
@@ -651,6 +681,15 @@ def _schedule(doc: dict) -> dict:
         "opens_tomorrow": False,
     }
     hours = _hours(doc)
+    if not hours["provided"]:
+        return {
+            "open_now": None,
+            "open_24_7": False,
+            "closes_at": None,
+            "opens_at": None,
+            "next_open_day": None,
+            "opens_tomorrow": False,
+        }
     if hours["always_open"]:
         return {**closed, "open_now": True, "open_24_7": True}
     tz_name = _text(doc.get("timezone")) or "Europe/Chisinau"
@@ -1242,6 +1281,7 @@ async def submit_business(
     owner_email = (current_user.get("email") or "").strip().lower()
     now = datetime.now(timezone.utc)
     rejected = await db.businesses.find_one({"owner_uid": uid, "status": "rejected"})
+    await _ensure_unique_name(db, fields["name"], rejected["_id"] if rejected else None)
     payload = {
         **fields,
         "owner_uid": uid,
@@ -1260,7 +1300,10 @@ async def submit_business(
         await _sync_primary_location(db, doc)
     else:
         payload["created_at"] = now
-        result = await db.businesses.insert_one(payload)
+        try:
+            result = await db.businesses.insert_one(payload)
+        except DuplicateKeyError:
+            raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
         payload["_id"] = result.inserted_id
         doc = payload
         await ensure_locations(db, doc)
@@ -1285,6 +1328,7 @@ async def publish_for_owner(
     """Publish a listing. An owner email, when present, gets an invitation."""
     admin_email = _require_admin(current_user)
     fields = _public_fields(body)
+    await _ensure_unique_name(db, fields["name"])
     owner_email = (body.owner_email or "").strip().lower()
     now = datetime.now(timezone.utc)
     payload = {
@@ -1297,7 +1341,10 @@ async def publish_for_owner(
         "created_at": now,
         "updated_at": now,
     }
-    result = await db.businesses.insert_one(payload)
+    try:
+        result = await db.businesses.insert_one(payload)
+    except DuplicateKeyError:
+        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
     payload["_id"] = result.inserted_id
     await ensure_locations(db, payload)
     business = await _with_locations(db, _to_out(payload), payload)
@@ -1323,14 +1370,18 @@ async def update_business(
         raise_api_error(404, ErrorCode.NOT_FOUND)
     now = datetime.now(timezone.utc)
     fields = _public_fields(body)
+    await _ensure_unique_name(db, fields["name"], doc["_id"])
     fields["updated_at"] = now
     unset = {"phones": "", "latitude": "", "longitude": "", "photo_url": ""}
     if "instagram" not in fields:
         unset["instagram"] = ""
-    await db.businesses.update_one(
-        {"_id": doc["_id"]},
-        {"$set": fields, "$unset": unset},
-    )
+    try:
+        await db.businesses.update_one(
+            {"_id": doc["_id"]},
+            {"$set": fields, "$unset": unset},
+        )
+    except DuplicateKeyError:
+        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
     doc.update(fields)
     if "instagram" not in fields:
         doc.pop("instagram", None)
@@ -1932,6 +1983,7 @@ async def owner_update_business(
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
     now = datetime.now(timezone.utc)
     fields = _public_fields(body)
+    await _ensure_unique_name(db, fields["name"], business["_id"])
     fields["updated_at"] = now
     if business.get("status") == "rejected":
         fields["status"] = "pending_review"
@@ -1942,7 +1994,10 @@ async def owner_update_business(
     unset = {"phones": "", "latitude": "", "longitude": "", "photo_url": ""}
     if "instagram" not in fields:
         unset["instagram"] = ""
-    await db.businesses.update_one({"_id": business["_id"]}, {"$set": fields, "$unset": unset})
+    try:
+        await db.businesses.update_one({"_id": business["_id"]}, {"$set": fields, "$unset": unset})
+    except DuplicateKeyError:
+        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
     business.update(fields)
     if "instagram" not in fields:
         business.pop("instagram", None)
