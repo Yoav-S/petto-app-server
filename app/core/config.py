@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     SUPPORT_EMAIL: str = "pettoservices@gmail.com"
     # Link included in the new-request email.
     BUSINESS_APP_URL: str = "https://business.ragly.cloud"
+    # Address search for the branch form. Nominatim asks for a contact in the user agent.
+    NOMINATIM_URL: str = "https://nominatim.openstreetmap.org"
+    GEO_CONTACT_EMAIL: str = ""
     
     @property
     def is_development(self) -> bool:

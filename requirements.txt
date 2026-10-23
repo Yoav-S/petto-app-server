@@ -11,3 +11,4 @@ bcrypt
 google-cloud-secret-manager
 python-dateutil
 tzdata
+timezonefinder

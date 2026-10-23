@@ -244,6 +244,8 @@ def send_business_owner_email(
     intro: str,
     lines: list[str] | None = None,
     action_url: str | None = None,
+    action_label: str = "Open your dashboard",
+    rtl: bool = False,
 ) -> None:
     """Tell the business owner that a request was received or its status changed."""
     notes = lines or []
@@ -252,23 +254,25 @@ def send_business_owner_email(
         text += "\n" + "\n".join(f"- {line}" for line in notes) + "\n"
     if action_url:
         text += f"\n{action_url}\n"
-    items = "".join(f"<li>{line}</li>" for line in notes)
-    notes_html = f"<ul style=\"margin:0 0 16px;padding-left:18px\">{items}</ul>" if items else ""
+    items = "".join(f"<li>{html.escape(line)}</li>" for line in notes)
+    padding = "padding-right:18px" if rtl else "padding-left:18px"
+    notes_html = f"<ul style=\"margin:0 0 16px;{padding}\">{items}</ul>" if items else ""
     link_html = (
-        f"<p style=\"margin:0\"><a href=\"{action_url}\" style=\"color:#004741\">Open your dashboard</a></p>"
+        f"<p style=\"margin:0\"><a href=\"{action_url}\" style=\"color:#004741\">{html.escape(action_label)}</a></p>"
         if action_url
         else ""
     )
-    html = (
-        "<div style=\"font-family:Arial,Helvetica,sans-serif;color:#1F2937;"
+    dir_attr = ' dir="rtl"' if rtl else ""
+    html_body = (
+        f"<div{dir_attr} style=\"font-family:Arial,Helvetica,sans-serif;color:#1F2937;"
         "line-height:1.5;max-width:520px\">"
         "<p style=\"margin:0 0 8px;font-size:16px\"><strong>Ragly</strong></p>"
-        f"<p style=\"margin:0 0 12px\">{intro}</p>"
+        f"<p style=\"margin:0 0 12px\">{html.escape(intro)}</p>"
         f"{notes_html}{link_html}</div>"
     )
     resend_key, resend_from, _source = resolve_resend_credentials()
     if resend_key and resend_from:
-        _send_via_resend(to_email, subject, text, html, resend_key, resend_from)
+        _send_via_resend(to_email, subject, text, html_body, resend_key, resend_from)
         logger.info("Business status email sent to %s", to_email)
         return
 

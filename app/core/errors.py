@@ -38,6 +38,20 @@ class ErrorCode(StrEnum):
     BUSINESS_INCOMPLETE = "business_incomplete"
     BUSINESS_NOT_PENDING = "business_not_pending"
     BUSINESS_NAME_TAKEN = "business_name_taken"
+    BRANCH_INCOMPLETE = "branch_incomplete"
+    BRANCH_NOT_PENDING = "branch_not_pending"
+    BRANCH_NOT_EDITABLE = "branch_not_editable"
+    BRANCH_HOURS_INVALID = "branch_hours_invalid"
+    GEO_UNAVAILABLE = "geo_unavailable"
+
+
+def raise_api_error_with(
+    status_code: int,
+    code: ErrorCode,
+    extra: dict,
+) -> None:
+    """Like raise_api_error, with more keys next to `code` (for example missing fields)."""
+    raise HTTPException(status_code=status_code, detail={"code": code.value, **extra})
 
 
 def raise_api_error(

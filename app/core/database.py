@@ -75,6 +75,11 @@ async def connect_to_db() -> None:
         unique=True,
     )
     await _db.business_locations.create_index("business_id")
+    await _db.business_locations.create_index("status")
+    await _db.business_locations.create_index("services.status")
+    await _db.business_events.create_index([("business_id", 1), ("created_at", -1)])
+    await _db.business_notice_reads.create_index("user_id", unique=True)
+    await _migrate_business_branches(_db)
     await _db.business_invitations.create_index(
         [("business_id", 1), ("email", 1), ("status", 1)]
     )
@@ -132,6 +137,70 @@ async def _ensure_business_name_index(db) -> None:
         await db.businesses.create_index("name_key", unique=True, name="business_name_key")
     except Exception:
         logger.exception("Could not create unique business name index; continuing startup")
+
+
+async def _migrate_business_branches(db) -> None:
+    """Bring every business and branch to the current document shape.
+
+    Runs on each start and changes nothing once documents are current:
+    - a business that still carries its address itself gets one branch row;
+    - a branch without services gets one service from the business category
+      and the branch hours; missing flags (is_main, visible, status) are filled;
+    - the business mirrors its main branch (category, categories, address, hours).
+    """
+    from datetime import datetime, timezone
+
+    from app import business_docs as docs
+
+    now = datetime.now(timezone.utc)
+    migrated_businesses = 0
+    migrated_branches = 0
+    cursor = db.businesses.find({})
+    async for business in cursor:
+        rows = await docs.list_branches(db, str(business["_id"]))
+        changed = False
+        if not rows:
+            legacy = docs.legacy_branch(business, now)
+            if legacy is not None:
+                result = await db.business_locations.insert_one(legacy)
+                legacy["_id"] = result.inserted_id
+                rows = [legacy]
+                changed = True
+                migrated_branches += 1
+        for row in rows:
+            update = docs.branch_upgrade(row, business, now)
+            if update:
+                await db.business_locations.update_one({"_id": row["_id"]}, {"$set": update})
+                row.update(update)
+                changed = True
+                migrated_branches += 1
+        if rows and not any(row.get("is_main") for row in rows):
+            main = docs.main_branch(rows)
+            if main is not None:
+                await db.business_locations.update_one({"_id": main["_id"]}, {"$set": {"is_main": True}})
+                main["is_main"] = True
+                changed = True
+        mirrored = docs.mirror_fields(business, rows) if rows else {}
+        needs_keys = any(key not in business for key in ("categories", "locale", "field_errors", "admin_notes", "photos"))
+        stale_mirror = any(business.get(key) != value for key, value in mirrored.items())
+        if changed or needs_keys or stale_mirror:
+            fill = {
+                "categories": mirrored.get("categories", []),
+                "locale": business.get("locale") if business.get("locale") in {"en", "ro", "ru", "he"} else "en",
+                "field_errors": docs.notes(business.get("field_errors")),
+                "admin_notes": docs.notes(business.get("admin_notes")),
+                "photos": docs.gallery(business),
+                "status": docs.business_status(business),
+                **mirrored,
+            }
+            if "source" not in business:
+                fill["source"] = "admin" if not business.get("owner_uid") else "owner"
+            await db.businesses.update_one({"_id": business["_id"]}, {"$set": fill})
+            migrated_businesses += 1
+    if migrated_businesses or migrated_branches:
+        logger.info(
+            "Business migration: businesses=%s branches=%s", migrated_businesses, migrated_branches
+        )
 
 
 async def close_db_connection() -> None:

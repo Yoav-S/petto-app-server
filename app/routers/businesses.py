@@ -1,73 +1,75 @@
-"""
-Business publish requests.
+"""Businesses, their branches, and the review flow.
 
-An owner submits one listing. Ragly admins, identified by RAGLY_ADMIN_EMAILS,
-approve or reject it. A new pending request emails every admin.
+Owner flow: onboarding creates a draft business → the owner adds a branch
+(address, pin, services with hours) → sends it for review → an admin approves
+or sends it back with notes per field → the first approved branch publishes
+the business. Admins create the same documents through one form.
+
+Pet owners read `/businesses/nearby` and `/businesses/{id}`; those shapes do
+not change when branches and services are added.
 """
+
+from __future__ import annotations
 
 import logging
 import math
 import re
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-from bson import ObjectId
-from pymongo.errors import DuplicateKeyError
 from typing import Literal
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
+
+from app import business_docs as docs
+from app.business_mail import note_lines, send_owner_update
 from app.business_names import business_name_key
 from app.core.config import settings
-from app.country import country_code
-from app.images import identify_image
 from app.core.database import get_database
-from app.core.firebase import delete_business_image, delete_business_images, upload_business_image
 from app.core.email_service import (
     EmailDeliveryError,
     send_business_invite_email,
-    send_business_owner_email,
     send_business_review_email,
     send_review_report_email,
 )
-from app.core.errors import ErrorCode, raise_api_error
+from app.core.errors import ErrorCode, raise_api_error, raise_api_error_with
+from app.core.firebase import delete_business_image, delete_business_images, upload_business_image
 from app.core.utils import doc_to_dict, is_valid_object_id
-from app.locations import (
-    ensure_locations,
-    list_location_docs,
-    location_out,
-    location_payload,
-    location_status,
-    locations_for,
-    mirror_fields,
-    place_location,
-    public_locations,
-)
+from app.country import country_code
+from app.geo import timezone_at
+from app.images import identify_image
 from app.middleware.auth import get_current_user
 from app.models.business import (
+    CATEGORIES,
     AdminApprove,
-    AdminPublish,
+    AdminCreate,
+    BranchApprove,
+    BranchReject,
+    BranchVisibility,
+    BranchWrite,
     BusinessCounts,
+    BusinessDetails,
     BusinessMembership,
     BusinessOut,
     BusinessPage,
     BusinessPlace,
     BusinessPlaceDetail,
     BusinessPlacePage,
-    PlaceReview,
-    ReviewReportWrite,
-    ReviewWrite,
     BusinessReject,
     BusinessSession,
-    BusinessSubmit,
+    EventOut,
     InvitationOut,
-    OpeningHours,
     LocationOut,
-    LocationWrite,
-    StoreReject,
-    StoreReview,
+    NameCheck,
     OwnerInvite,
     PhotoRemove,
+    PlaceConflict,
+    PlaceReview,
+    ReviewBranch,
+    ReviewGroup,
+    ReviewReportWrite,
+    ReviewWrite,
     TeamInvite,
 )
 
@@ -75,10 +77,15 @@ logger = logging.getLogger("petto")
 
 router = APIRouter(tags=["businesses"])
 
-_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
-_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-_MAX_PHOTOS = 6
 _MAX_PHOTO_BYTES = 5 * 1024 * 1024
+_ROLES = {"owner", "branch_owner", "lead", "worker"}
+_NOTICE_LIMIT = 20
+_CONFLICT_METERS = 60
+
+
+# ---------------------------------------------------------------------------
+# Access
+# ---------------------------------------------------------------------------
 
 
 def _require_admin(current_user: dict) -> str:
@@ -88,201 +95,56 @@ def _require_admin(current_user: dict) -> str:
     return email
 
 
-def _clean_optional(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
+def _is_admin(current_user: dict) -> bool:
+    return settings.is_ragly_admin(current_user.get("email"))
 
 
-def _validate_hours(hours: OpeningHours) -> dict:
-    """Store the seven days. Hours can be omitted. An empty listed day is closed."""
-    if not hours.provided:
-        return {"provided": False, "always_open": False, **{day: [] for day in _DAYS}}
-    if hours.always_open:
-        stored = {day: [{"open": "00:00", "close": "23:59"}] for day in _DAYS}
-        stored["provided"] = True
-        stored["always_open"] = False
-        return stored
-    stored = {"provided": True, "always_open": False}
-    for day in _DAYS:
-        slots = []
-        for slot in getattr(hours, day):
-            if not _TIME.match(slot.open) or not _is_clock(slot.close, end=True):
-                raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-            if slot.open >= slot.close:
-                raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-            slots.append({"open": slot.open, "close": slot.close})
-        stored[day] = slots
-    return stored
+def _actor(current_user: dict) -> dict:
+    return {"uid": current_user.get("uid"), "email": (current_user.get("email") or "").strip().lower()}
 
 
-def _clean_photo(value: str | None) -> str | None:
-    photo = _clean_optional(value)
-    if not photo:
-        return None
-    if "://" in photo:
-        if not photo.startswith("https://"):
-            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-        return photo
-    if "/" in photo or "\\" in photo or ".." in photo:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    return photo
+async def _business_or_404(db: AsyncIOMotorDatabase, business_id: str) -> dict:
+    if not ObjectId.is_valid(business_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    doc = await db.businesses.find_one({"_id": ObjectId(business_id)})
+    if not doc:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    return doc
 
 
-def _public_fields(body: BusinessSubmit) -> dict:
-    try:
-        ZoneInfo(body.timezone.strip())
-    except ZoneInfoNotFoundError:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    website = _clean_optional(body.website)
-    if website and not website.startswith(("http://", "https://")):
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    longitude, latitude = body.location.coordinates
-    fields = {
-        "name": body.name.strip(),
-        "name_key": business_name_key(body.name),
-        "phone": body.phone,
-        "email": _clean_optional(body.email),
-        "description": _clean_optional(body.description),
-        "category": body.category,
-        "city": body.city.strip(),
-        "address": body.address.strip(),
-        "timezone": body.timezone.strip(),
-        "opening_hours": _validate_hours(body.opening_hours),
-        "website": website,
-        "location": {"type": "Point", "coordinates": [longitude, latitude]},
-        "photo": _clean_photo(body.photo),
-    }
-    instagram = _clean_optional(body.instagram)
-    if instagram:
-        fields["instagram"] = instagram
-    return fields
-
-
-def _phone_list(doc: dict) -> list[str]:
-    raw = doc.get("phone", doc.get("phones"))
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, list):
-        return []
-    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
-
-
-def _location(doc: dict) -> dict | None:
-    location = doc.get("location")
-    if isinstance(location, dict) and isinstance(location.get("coordinates"), list):
-        coords = location["coordinates"]
-        if len(coords) == 2:
-            try:
-                return {"type": "Point", "coordinates": [float(coords[0]), float(coords[1])]}
-            except (TypeError, ValueError):
-                return None
-    latitude = doc.get("latitude")
-    longitude = doc.get("longitude")
-    if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
-        return {"type": "Point", "coordinates": [float(longitude), float(latitude)]}
-    return None
-
-
-def _hours(doc: dict) -> dict:
-    raw = doc.get("opening_hours") if isinstance(doc.get("opening_hours"), dict) else {}
-    provided = bool(raw["provided"]) if "provided" in raw else True
-    if not provided:
-        return {"provided": False, "always_open": False, **{day: [] for day in _DAYS}}
-    hours: dict = {"provided": True, "always_open": bool(raw.get("always_open", False))}
-    for day in _DAYS:
-        slots = []
-        for slot in raw.get(day) or []:
-            if isinstance(slot, dict) and slot.get("open") and slot.get("close"):
-                slots.append({"open": str(slot["open"]), "close": str(slot["close"])})
-        hours[day] = slots
-    return hours
-
-
-async def _ensure_unique_name(db: AsyncIOMotorDatabase, name: str, except_id=None) -> None:
-    """Reject a name that already belongs to another business, including a pending one."""
-    key = business_name_key(name)
-    if not key:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    query: dict = {"name_key": key}
-    if except_id is not None:
-        query["_id"] = {"$ne": except_id}
-    if await db.businesses.find_one(query):
-        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
-    legacy_query: dict = {"name_key": {"$exists": False}}
-    if except_id is not None:
-        legacy_query["_id"] = {"$ne": except_id}
-    for doc in await db.businesses.find(legacy_query, {"name": 1}).to_list(None):
-        if business_name_key(str(doc.get("name") or "")) == key:
-            raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
-
-
-def _field_errors(doc: dict) -> dict[str, str]:
-    raw = doc.get("field_errors")
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        key: value.strip()
-        for key, value in raw.items()
-        if isinstance(key, str) and isinstance(value, str) and value.strip()
-    }
-
-
-def _gallery(doc: dict) -> list[str]:
-    raw = doc.get("photos")
-    if not isinstance(raw, list):
-        return []
-    return [
-        item
-        for item in raw
-        if isinstance(item, str) and item.startswith("https://")
-    ][:_MAX_PHOTOS]
-
-
-def _text(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _to_out(doc: dict) -> BusinessOut:
-    data = doc_to_dict(doc)
-    owner_uid = _text(data.get("owner_uid"))
-    owner_email = _text(data.get("owner_email"))
-    photo = _text(data.get("photo")) or _text(data.get("photo_url"))
-    photos = _gallery(doc)
-    if photo and photo.startswith("https://") and photo not in photos:
-        photos = [photo, *photos][:_MAX_PHOTOS]
-    return BusinessOut(
-        id=data["id"],
-        name=_text(data.get("name")) or "",
-        phone=_phone_list(doc),
-        email=_text(data.get("email")),
-        description=_text(data.get("description")),
-        category=data.get("category"),
-        city=_text(data.get("city")) or "",
-        status=data.get("status"),
-        address=_text(data.get("address")) or "",
-        timezone=_text(data.get("timezone")) or "Europe/Chisinau",
-        opening_hours=_hours(doc),
-        website=_text(data.get("website")),
-        location=_location(doc),
-        photo=photo,
-        photos=photos,
-        owner_uid=owner_uid,
-        owner_email=owner_email,
-        owned=bool(owner_uid),
-        instagram=_text(data.get("instagram")),
-        rejection_reason=_text(data.get("rejection_reason")),
-        field_errors=_field_errors(doc),
-        admin_notes=_field_errors({"field_errors": doc.get("admin_notes")}),
-        reviewed_at=data.get("reviewed_at"),
-        created_at=data.get("created_at"),
-        updated_at=data.get("updated_at"),
-        submitted_at=data.get("submitted_at"),
+async def _branch_or_404(db: AsyncIOMotorDatabase, business: dict, location_id: str) -> dict:
+    if not ObjectId.is_valid(location_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    row = await db.business_locations.find_one(
+        {"_id": ObjectId(location_id), "business_id": str(business["_id"])}
     )
+    if not row:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    return row
+
+
+async def _listing_owner(db: AsyncIOMotorDatabase, business: dict, uid: str) -> bool:
+    """The account that created the business, or a member with the owner role."""
+    if business.get("owner_uid") == uid:
+        return True
+    member = await db.business_members.find_one({"business_id": str(business["_id"]), "user_id": uid})
+    return bool(member and member.get("role") == "owner")
+
+
+async def _brand_owner(db: AsyncIOMotorDatabase, business: dict, current_user: dict) -> bool:
+    if _is_admin(current_user):
+        return True
+    return await _listing_owner(db, business, current_user["uid"])
+
+
+async def _require_brand_owner(db: AsyncIOMotorDatabase, business: dict, current_user: dict) -> None:
+    if not await _brand_owner(db, business, current_user):
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
 
 
 def _invite_out(doc: dict, business_name: str = "") -> InvitationOut:
@@ -291,10 +153,10 @@ def _invite_out(doc: dict, business_name: str = "") -> InvitationOut:
         id=data["id"],
         business_id=str(data.get("business_id") or ""),
         business_name=business_name,
-        email=_text(data.get("email")) or "",
-        role=data.get("role") if data.get("role") in {"owner", "branch_owner", "lead", "worker"} else "worker",
-        status=data.get("status"),
-        location_id=_text(data.get("location_id")),
+        email=docs.text(data.get("email")),
+        role=data.get("role") if data.get("role") in _ROLES else "worker",
+        status=data.get("status") if data.get("status") in {"pending", "approved", "declined"} else "pending",
+        location_id=docs.optional_text(data.get("location_id")),
     )
 
 
@@ -311,28 +173,49 @@ async def _load_invitations(db: AsyncIOMotorDatabase, business_ids: list[str]) -
 async def _owner_business_ids(db: AsyncIOMotorDatabase, business_ids: list[str]) -> set[str]:
     if not business_ids:
         return set()
-    rows = await db.business_members.find(
-        {"business_id": {"$in": business_ids}, "role": "owner"}
-    ).to_list(None)
+    rows = await db.business_members.find({"business_id": {"$in": business_ids}, "role": "owner"}).to_list(None)
     return {str(row.get("business_id")) for row in rows}
 
 
-def _apply_team(business: BusinessOut, invitations: list[InvitationOut], owner_ids: set[str]) -> BusinessOut:
-    business.invitations = invitations
-    if business.id in owner_ids:
-        business.owned = True
-    return business
+async def _full_out(db: AsyncIOMotorDatabase, business: dict) -> BusinessOut:
+    """The business with its branches, invitations, and ownership flag."""
+    rows = await docs.ensure_branches(db, business)
+    out = docs.business_out(business)
+    out.locations = [docs.branch_out(row, business) for row in rows]
+    invitations = await _load_invitations(db, [out.id])
+    owner_ids = await _owner_business_ids(db, [out.id])
+    out.invitations = invitations.get(out.id, [])
+    if out.id in owner_ids:
+        out.owned = True
+    return out
+
+
+async def _decorate(db: AsyncIOMotorDatabase, business_docs: list[dict]) -> list[BusinessOut]:
+    business_ids = [str(doc["_id"]) for doc in business_docs]
+    invitations = await _load_invitations(db, business_ids)
+    owner_ids = await _owner_business_ids(db, business_ids)
+    grouped = await docs.branches_for(db, business_ids)
+    decorated: list[BusinessOut] = []
+    for doc in business_docs:
+        out = docs.business_out(doc)
+        rows = grouped.get(out.id) or await docs.ensure_branches(db, doc)
+        out.locations = [docs.branch_out(row, doc) for row in rows]
+        out.invitations = invitations.get(out.id, [])
+        if out.id in owner_ids:
+            out.owned = True
+        decorated.append(out)
+    return decorated
+
+
+# ---------------------------------------------------------------------------
+# Invitations and members
+# ---------------------------------------------------------------------------
 
 
 def _send_invite(email: str, business_name: str, role: str) -> None:
     accept_url = settings.BUSINESS_APP_URL.strip().rstrip("/") + "/dashboard"
     try:
-        send_business_invite_email(
-            email,
-            business_name=business_name,
-            role=role,
-            accept_url=accept_url,
-        )
+        send_business_invite_email(email, business_name=business_name, role=role, accept_url=accept_url)
     except EmailDeliveryError:
         logger.exception("Invite email failed for %s", email)
 
@@ -354,12 +237,7 @@ async def _create_invitation(
     if member:
         raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
     pending = await db.business_invitations.find_one(
-        {
-            "business_id": business_id,
-            "email": email,
-            "status": "pending",
-            "location_id": location_id,
-        }
+        {"business_id": business_id, "email": email, "status": "pending", "location_id": location_id}
     )
     if pending:
         raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
@@ -378,7 +256,31 @@ async def _create_invitation(
     result = await db.business_invitations.insert_one(payload)
     payload["_id"] = result.inserted_id
     _send_invite(email, business.get("name") or "", role)
+    await docs.record_event(
+        db, business=business, kind="owner_invited" if role == "owner" else "member_invited",
+        audience="admins", actor={"email": invited_by}, message=email,
+    )
     return payload
+
+
+async def _upsert_owner_member(db: AsyncIOMotorDatabase, business: dict, uid: str, email: str | None, now: datetime) -> None:
+    """The same member row whether the owner onboarded or accepted an invitation."""
+    await db.business_members.update_one(
+        {"business_id": str(business["_id"]), "user_id": uid, "location_id": None},
+        {
+            "$set": {
+                "business_id": str(business["_id"]),
+                "user_id": uid,
+                "email": email,
+                "role": "owner",
+                "location_id": None,
+                "reports_to": None,
+                "updated_at": now,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
 
 
 async def _delete_business(db: AsyncIOMotorDatabase, doc: dict) -> None:
@@ -387,164 +289,142 @@ async def _delete_business(db: AsyncIOMotorDatabase, doc: dict) -> None:
     await db.business_members.delete_many({"business_id": business_id})
     await db.business_invitations.delete_many({"business_id": business_id})
     await db.business_locations.delete_many({"business_id": business_id})
-    await db.business_deletions.insert_one(
-        {"business_id": business_id, "deleted_at": datetime.now(timezone.utc)}
-    )
+    await db.business_events.delete_many({"business_id": business_id})
+    await db.business_deletions.insert_one({"business_id": business_id, "deleted_at": datetime.now(timezone.utc)})
     delete_business_images(business_id)
 
 
-async def _with_team(db: AsyncIOMotorDatabase, business: BusinessOut) -> BusinessOut:
-    invitations = await _load_invitations(db, [business.id])
-    owner_ids = await _owner_business_ids(db, [business.id])
-    return _apply_team(business, invitations.get(business.id, []), owner_ids)
+# ---------------------------------------------------------------------------
+# Names
+# ---------------------------------------------------------------------------
 
 
-async def _listing_owner(db: AsyncIOMotorDatabase, business: dict, uid: str) -> bool:
-    """The account that submitted the listing, or a member with the owner role."""
-    if business.get("owner_uid") == uid:
+def _listing_has_owner(doc: dict) -> bool:
+    return bool(docs.optional_text(doc.get("owner_uid")) or docs.optional_text(doc.get("owner_email")))
+
+
+async def _listing_is_claimable(db: AsyncIOMotorDatabase, doc: dict) -> bool:
+    """Unowned listings can be claimed by contacting us. An owner, member, or pending owner invite is not claimable."""
+    if _listing_has_owner(doc):
+        return False
+    business_id = str(doc.get("_id") or "")
+    if not business_id:
         return True
-    member = await db.business_members.find_one(
-        {"business_id": str(business["_id"]), "user_id": uid}
-    )
-    return bool(member and member.get("role") == "owner")
+    if await db.business_members.find_one({"business_id": business_id, "role": "owner"}):
+        return False
+    if await db.business_invitations.find_one({"business_id": business_id, "role": "owner", "status": "pending"}):
+        return False
+    return True
 
 
-async def _add_business_photo(
-    db: AsyncIOMotorDatabase,
-    business: dict,
-    file: UploadFile,
-) -> BusinessOut:
-    content = await file.read(_MAX_PHOTO_BYTES + 1)
-    identified = identify_image(content) if content and len(content) <= _MAX_PHOTO_BYTES else None
-    if identified is None:
+async def _business_with_name(
+    db: AsyncIOMotorDatabase, name: str, except_id: ObjectId | None = None
+) -> dict | None:
+    key = business_name_key(name)
+    if not key:
+        return None
+    query: dict = {"name_key": key}
+    if except_id is not None:
+        query["_id"] = {"$ne": except_id}
+    found = await db.businesses.find_one(query)
+    if found:
+        return found
+    legacy: dict = {"name_key": {"$exists": False}}
+    if except_id is not None:
+        legacy["_id"] = {"$ne": except_id}
+    for doc in await db.businesses.find(legacy, {"name": 1, "owner_uid": 1, "owner_email": 1}).to_list(None):
+        if business_name_key(str(doc.get("name") or "")) == key:
+            return doc
+    return None
+
+
+async def _name_taken(db: AsyncIOMotorDatabase, name: str, except_id: ObjectId | None = None) -> bool:
+    return await _business_with_name(db, name, except_id) is not None
+
+
+async def _ensure_unique_name(db: AsyncIOMotorDatabase, name: str, except_id: ObjectId | None = None) -> None:
+    if not business_name_key(name):
         raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    content_type = identified[0]
-    photos = _gallery(business)
-    if len(photos) >= _MAX_PHOTOS:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    try:
-        url = upload_business_image(str(business["_id"]), content, content_type)
-    except Exception:
-        logger.exception("Business photo upload failed for %s", business.get("_id"))
-        raise_api_error(500, ErrorCode.FAILED_TO_SAVE)
-    photos.append(url)
-    now = datetime.now(timezone.utc)
-    await db.businesses.update_one(
-        {"_id": business["_id"]},
-        {"$set": {"photos": photos, "updated_at": now}},
-    )
-    business["photos"] = photos
-    business["updated_at"] = now
-    return await _with_team(db, _to_out(business))
-
-
-async def _remove_business_photo(
-    db: AsyncIOMotorDatabase,
-    business: dict,
-    url: str,
-) -> BusinessOut:
-    url = url.strip()
-    photos = _gallery(business)
-    photo = _text(business.get("photo")) or _text(business.get("photo_url"))
-    if url not in photos and photo != url:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    photos = [item for item in photos if item != url]
-    now = datetime.now(timezone.utc)
-    update: dict = {"photos": photos, "updated_at": now}
-    unset: dict = {}
-    if photo == url:
-        unset["photo"] = ""
-        business.pop("photo", None)
-    await db.businesses.update_one(
-        {"_id": business["_id"]},
-        {"$set": update, **({"$unset": unset} if unset else {})},
-    )
-    business["photos"] = photos
-    business["updated_at"] = now
-    try:
-        delete_business_image(str(business["_id"]), url)
-    except Exception:
-        logger.exception("Business photo delete failed for %s", business.get("_id"))
-    return await _with_team(db, _to_out(business))
-
-
-def _email_owner(
-    email: str | None,
-    *,
-    business_name: str,
-    subject: str,
-    intro: str,
-    lines: list[str] | None = None,
-) -> None:
-    if not email:
+    existing = await _business_with_name(db, name, except_id)
+    if existing is None:
         return
-    dashboard = settings.BUSINESS_APP_URL.strip().rstrip("/") + "/dashboard"
-    try:
-        send_business_owner_email(
-            email,
-            business_name=business_name,
-            subject=subject,
-            intro=intro,
-            lines=lines,
-            action_url=dashboard,
-        )
-    except EmailDeliveryError:
-        logger.exception("Owner email failed for %s", email)
+    raise_api_error_with(
+        409,
+        ErrorCode.BUSINESS_NAME_TAKEN,
+        {"claimable": await _listing_is_claimable(db, existing)},
+    )
 
 
-def _notify_admins(fields: dict, owner_email: str) -> None:
+@router.get("/businesses/name-check", response_model=NameCheck)
+async def check_business_name(
+    name: str = Query(min_length=1, max_length=200),
+    business_id: str | None = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Whether this name is free, while the owner is still typing it."""
+    del current_user
+    except_id = ObjectId(business_id) if business_id and ObjectId.is_valid(business_id) else None
+    key = business_name_key(name)
+    if not key:
+        return NameCheck(available=False, name_key="", claimable=False)
+    existing = await _business_with_name(db, name, except_id)
+    if existing is None:
+        return NameCheck(available=True, name_key=key, claimable=False)
+    return NameCheck(available=False, name_key=key, claimable=await _listing_is_claimable(db, existing))
+
+
+# ---------------------------------------------------------------------------
+# Emails to admins
+# ---------------------------------------------------------------------------
+
+
+def _notify_admins(business: dict, branch: dict, owner_email: str) -> None:
     review_url = settings.BUSINESS_APP_URL.strip().rstrip("/") + "/admin"
+    categories = ", ".join(docs.branch_categories(branch, business, public_only=False)) or "—"
     for admin_email in sorted(settings.ragly_admin_emails):
         try:
             send_business_review_email(
                 admin_email,
-                business_name=fields["name"],
+                business_name=docs.text(business.get("name")),
                 owner_email=owner_email,
-                city=fields["city"],
-                category=fields["category"],
+                city=docs.text(branch.get("city")) or docs.text(branch.get("address")),
+                category=categories,
                 review_url=review_url,
             )
         except EmailDeliveryError:
             logger.exception("Review email failed for %s", admin_email)
 
 
-async def _with_locations(db: AsyncIOMotorDatabase, business: BusinessOut, doc: dict) -> BusinessOut:
-    rows = await ensure_locations(db, doc)
-    business.locations = [location_out(row) for row in rows]
-    return business
+async def _owner_contact(db: AsyncIOMotorDatabase, business: dict) -> tuple[str | None, str]:
+    """Where to email the owner and in which language."""
+    email = docs.optional_text(business.get("owner_email"))
+    if not email:
+        member = await db.business_members.find_one({"business_id": str(business["_id"]), "role": "owner"})
+        email = docs.optional_text((member or {}).get("email"))
+    return email, docs.business_locale(business)
 
 
-async def _sync_primary_location(db: AsyncIOMotorDatabase, business: dict) -> None:
-    """The form still edits the first branch together with the brand."""
-    rows = await ensure_locations(db, business)
-    if not rows:
-        return
-    mirrored = mirror_fields(business)
-    mirrored["updated_at"] = datetime.now(timezone.utc)
-    await db.business_locations.update_one({"_id": rows[0]["_id"]}, {"$set": mirrored})
+# ---------------------------------------------------------------------------
+# Session
+# ---------------------------------------------------------------------------
 
 
-def _point_lat_lng(point: dict | None) -> tuple[float, float] | None:
-    if not point:
-        return None
-    coords = point.get("coordinates")
-    if not isinstance(coords, list) or len(coords) != 2:
-        return None
-    try:
-        return float(coords[1]), float(coords[0])
-    except (TypeError, ValueError):
-        return None
-
-
-def _distance_between(
-    latitude: float | None,
-    longitude: float | None,
-    point: dict | None,
-) -> float | None:
-    if not point or latitude is None or longitude is None:
-        return None
-    lng, lat = point["coordinates"]
-    return round(_distance_km(latitude, longitude, lat, lng), 1)
+async def _notices(db: AsyncIOMotorDatabase, uid: str, business_ids: list[str]) -> list[EventOut]:
+    if not business_ids:
+        return []
+    read = await db.business_notice_reads.find_one({"user_id": uid}) or {}
+    seen_at = read.get("seen_at")
+    query: dict = {"business_id": {"$in": business_ids}, "audience": "owner"}
+    if isinstance(seen_at, datetime):
+        query["created_at"] = {"$gt": seen_at}
+    rows = (
+        await db.business_events.find(query)
+        .sort([("created_at", -1), ("_id", -1)])
+        .limit(_NOTICE_LIMIT)
+        .to_list(_NOTICE_LIMIT)
+    )
+    return [docs.event_out(row) for row in rows]
 
 
 @router.get("/businesses/mine", response_model=BusinessSession)
@@ -552,21 +432,19 @@ async def my_business(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Every business this account can open, including each branch."""
+    """Every business this account can open, with branches, invitations, and unread notices."""
     uid = current_user["uid"]
     email = (current_user.get("email") or "").strip().lower()
     memberships = await db.business_members.find({"user_id": uid}).to_list(None)
     owned_docs = await db.businesses.find({"owner_uid": uid}).to_list(None)
     by_id: dict[str, dict] = {str(doc["_id"]): doc for doc in owned_docs}
-    access: dict[str, tuple[str, str | None]] = {
-        business_id: ("owner", None) for business_id in by_id
-    }
+    access: dict[str, tuple[str, str | None]] = {business_id: ("owner", None) for business_id in by_id}
     for member in memberships:
         business_id = str(member.get("business_id") or "")
         if not ObjectId.is_valid(business_id):
             continue
-        role = member.get("role") if member.get("role") in {"owner", "branch_owner", "lead", "worker"} else "worker"
-        location_id = _text(member.get("location_id"))
+        role = member.get("role") if member.get("role") in _ROLES else "worker"
+        location_id = docs.optional_text(member.get("location_id"))
         if business_id not in by_id:
             doc = await db.businesses.find_one({"_id": ObjectId(business_id)})
             if not doc:
@@ -582,49 +460,54 @@ async def my_business(
     entries: list[BusinessMembership] = []
     for business_id, doc in by_id.items():
         role, location_id = access.get(business_id, ("owner", None))
-        listed = await _with_locations(db, _to_out(doc), doc)
-        invitations = await _load_invitations(db, [listed.id])
-        owner_ids = await _owner_business_ids(db, [listed.id])
-        _apply_team(listed, invitations.get(listed.id, []), owner_ids)
+        listed = await _full_out(db, doc)
         if role != "owner" and location_id:
             listed.locations = [item for item in listed.locations if item.id == location_id]
         entries.append(BusinessMembership(business=listed, role=role, location_id=location_id))
-    entries.sort(key=lambda item: item.business.name.lower())
+    entries.sort(key=lambda item: (item.business.created_at or datetime.min.replace(tzinfo=timezone.utc)))
     first = entries[0].business if entries else None
-    # A listing the person submitted is not an owner seat until it is published
-    # or an invitation is approved. Pending review keeps the old empty role.
-    confirmed = [
-        item.role
-        for item in entries
-        if item.business.status == "published" or item.business.id in {
-            str(member.get("business_id"))
-            for member in memberships
-            if member.get("role")
-        }
-    ]
-    first_role = confirmed[0] if confirmed else None
-    pending_rows = []
-    if email:
-        pending_rows = await db.business_invitations.find(
-            {"email": email, "status": "pending"}
-        ).to_list(None)
+    first_role = entries[0].role if entries else None
+    pending_rows = await db.business_invitations.find({"email": email, "status": "pending"}).to_list(None) if email else []
     pending: list[InvitationOut] = []
     for row in pending_rows:
         business_name = ""
         if ObjectId.is_valid(str(row.get("business_id"))):
-            invited_business = await db.businesses.find_one(
-                {"_id": ObjectId(row["business_id"])}
-            )
-            if invited_business:
-                business_name = invited_business.get("name") or ""
+            invited = await db.businesses.find_one({"_id": ObjectId(row["business_id"])})
+            if invited:
+                business_name = invited.get("name") or ""
         pending.append(_invite_out(row, business_name))
+    person = await db.users.find_one({"firebase_uid": uid}) or {}
+    locale = docs.text(person.get("locale")).lower()[:2]
+    if first is not None:
+        locale = first.locale
     return BusinessSession(
-        is_ragly_admin=settings.is_ragly_admin(current_user.get("email")),
+        is_ragly_admin=_is_admin(current_user),
         business=first,
         businesses=entries,
         role=first_role,
         invitations=pending,
+        notices=await _notices(db, uid, list(by_id)),
+        locale=locale if locale in {"en", "ro", "ru", "he"} else "en",
     )
+
+
+@router.post("/businesses/seen", status_code=204)
+async def mark_business_notices_seen(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """The owner opened the bell. Notices before now are read."""
+    now = datetime.now(timezone.utc)
+    await db.business_notice_reads.update_one(
+        {"user_id": current_user["uid"]},
+        {"$set": {"user_id": current_user["uid"], "seen_at": now}},
+        upsert=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public listing for pet owners
+# ---------------------------------------------------------------------------
 
 
 def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -632,109 +515,24 @@ def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     d_phi = math.radians(lat2 - lat1)
     d_lambda = math.radians(lon2 - lon1)
-    arc = (
-        math.sin(d_phi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
-    )
+    arc = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
     return 2 * radius * math.asin(math.sqrt(arc))
 
 
+def _distance_between(latitude: float | None, longitude: float | None, point: dict | None) -> float | None:
+    pair = docs.lat_lng(point)
+    if pair is None or latitude is None or longitude is None:
+        return None
+    return round(_distance_km(latitude, longitude, pair[0], pair[1]), 1)
+
+
 def _place_image(doc: dict) -> str | None:
-    for url in _gallery(doc):
+    for url in docs.gallery(doc):
         return url
-    photo = _text(doc.get("photo")) or _text(doc.get("photo_url"))
+    photo = docs.logo(doc)
     if photo and photo.startswith("https://"):
         return photo
     return None
-
-
-def _clock(minutes: int) -> str:
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
-
-def _is_clock(value: str, *, end: bool = False) -> bool:
-    """A HH:MM clock. A closing time may be 24:00, the end of that day."""
-    if end and value == "24:00":
-        return True
-    return bool(_TIME.match(value))
-
-
-def _minutes(value: object) -> int | None:
-    if not isinstance(value, str):
-        return None
-    if value == "24:00":
-        return 24 * 60
-    if not _TIME.match(value):
-        return None
-    hour, minute = value.split(":")
-    return int(hour) * 60 + int(minute)
-
-
-def _schedule(doc: dict) -> dict:
-    """Open or closed in the business timezone, plus the next change."""
-    closed = {
-        "open_now": False,
-        "open_24_7": False,
-        "closes_at": None,
-        "opens_at": None,
-        "next_open_day": None,
-        "opens_tomorrow": False,
-    }
-    hours = _hours(doc)
-    if not hours["provided"]:
-        return {
-            "open_now": None,
-            "open_24_7": False,
-            "closes_at": None,
-            "opens_at": None,
-            "next_open_day": None,
-            "opens_tomorrow": False,
-        }
-    if hours["always_open"]:
-        return {**closed, "open_now": True, "open_24_7": True}
-    tz_name = _text(doc.get("timezone")) or "Europe/Chisinau"
-    try:
-        zone = ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        zone = ZoneInfo("Europe/Chisinau")
-    now = datetime.now(zone)
-    today = now.weekday()
-    now_min = now.hour * 60 + now.minute
-
-    def slots_for(index: int) -> list[tuple[int, int]]:
-        parsed: list[tuple[int, int]] = []
-        for slot in hours[_DAYS[index]]:
-            start = _minutes(slot.get("open"))
-            end = _minutes(slot.get("close"))
-            if start is None or end is None or end <= start:
-                continue
-            parsed.append((start, end))
-        return parsed
-
-    def full_day(index: int) -> bool:
-        return any(start == 0 and end >= 24 * 60 - 1 for start, end in slots_for(index))
-
-    if all(full_day(index) for index in range(7)):
-        return {**closed, "open_now": True, "open_24_7": True}
-
-    for start, end in slots_for(today):
-        if start <= now_min < end:
-            return {**closed, "open_now": True, "closes_at": _clock(end)}
-    later = [start for start, _end in slots_for(today) if start > now_min]
-    if later:
-        return {**closed, "opens_at": _clock(min(later))}
-    for offset in range(1, 8):
-        index = (today + offset) % 7
-        upcoming = slots_for(index)
-        if not upcoming:
-            continue
-        return {
-            **closed,
-            "opens_at": _clock(min(start for start, _end in upcoming)),
-            "next_open_day": _DAYS[index],
-            "opens_tomorrow": offset == 1,
-        }
-    return closed
 
 
 async def _ratings(db: AsyncIOMotorDatabase, business_ids: list[str]) -> dict[str, float]:
@@ -756,6 +554,17 @@ async def _ratings(db: AsyncIOMotorDatabase, business_ids: list[str]) -> dict[st
     }
 
 
+def _public_card_category(doc: dict, branches: list[dict], wanted: str | None) -> str | None:
+    if wanted:
+        return wanted
+    for branch in branches:
+        categories = docs.branch_categories(branch, doc, public_only=True)
+        if categories:
+            return categories[0]
+    category = doc.get("category")
+    return category if category in CATEGORIES else None
+
+
 @router.get("/businesses/nearby", response_model=BusinessPlacePage)
 async def nearby_businesses(
     latitude: float | None = None,
@@ -767,95 +576,67 @@ async def nearby_businesses(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """One card per business. With coordinates, the card is the closest branch.
+    """One card per live branch, closest first.
 
-    The response is one page (`limit` / `offset`). Matching businesses are ranked
-    first, then sliced, so a category of any size keeps paging instead of stopping
-    at a fixed cap.
+    A category filter keeps only branches that offer that service, and the
+    chips and hours on the card are that service's.
     """
     del current_user
-    allowed_category = {
-        "veterinarian",
-        "groomer",
-        "pharmacy",
-        "pet_friendly",
-        "pet_store",
-    }
-    if category and category not in allowed_category:
+    if category and category not in CATEGORIES:
         return BusinessPlacePage(items=[], has_more=False)
-    query: dict = {"status": "published", "category": category or {"$in": list(allowed_category)}}
-    docs = await db.businesses.find(query).to_list(None)
-    located = await locations_for(db, [str(doc["_id"]) for doc in docs])
+    query: dict = {"status": "published"}
+    if category:
+        query["$or"] = [{"categories": category}, {"category": category}]
+    business_rows = await db.businesses.find(query).to_list(None)
+    grouped = await docs.branches_for(db, [str(doc["_id"]) for doc in business_rows])
     user_country = None
     if not anywhere and latitude is not None and longitude is not None:
         user_country = country_code(latitude, longitude)
     places: list[BusinessPlace] = []
-    for doc in docs:
-        data = doc_to_dict(doc)
-        if data.get("category") not in allowed_category:
-            continue
-        branches = public_locations(located.get(data["id"]) or await ensure_locations(db, doc))
-        candidates: list[tuple[dict, dict | None]] = []
-        if branches:
-            for branch in branches:
-                point = branch.get("location") if isinstance(branch.get("location"), dict) else None
-                candidates.append((branch, point))
+    for doc in business_rows:
+        business_id = str(doc["_id"])
+        rows = grouped.get(business_id) or await docs.ensure_branches(db, doc)
+        branches = docs.public_branches(rows)
+        if category:
+            branches = [
+                branch for branch in branches
+                if category in docs.branch_categories(branch, doc, public_only=True)
+            ]
         else:
-            candidates.append((doc, _location(doc)))
-        visible: list[tuple[dict, dict | None]] = []
-        for item, point in candidates:
-            if user_country is None:
-                visible.append((item, point))
+            branches = [branch for branch in branches if docs.public_services(branch, doc)]
+        for branch in branches:
+            pair = docs.lat_lng(docs.point_doc(branch.get("location")))
+            if user_country is not None and (pair is None or country_code(pair[0], pair[1]) != user_country):
                 continue
-            pair = _point_lat_lng(point)
-            if pair is None or country_code(pair[0], pair[1]) != user_country:
+            cats = [category] if category else docs.branch_categories(branch, doc, public_only=True)
+            card_category = cats[0] if cats else _public_card_category(doc, [branch], category)
+            if card_category is None:
                 continue
-            visible.append((item, point))
-        if not visible:
-            continue
-        chosen, chosen_point = visible[0]
-        distance = _distance_between(latitude, longitude, chosen_point)
-        for item, point in visible[1:]:
-            branch_distance = _distance_between(latitude, longitude, point)
-            if branch_distance is None:
-                continue
-            if distance is None or branch_distance < distance:
-                chosen = item
-                chosen_point = point
-                distance = branch_distance
-        schedule = _schedule(chosen if chosen.get("opening_hours") else doc)
-        places.append(
-            BusinessPlace(
-                id=data["id"],
-                name=_text(data.get("name")) or "",
-                category=data.get("category"),
-                city=_text(chosen.get("city")) or _text(data.get("city")) or "",
-                image=_place_image(doc),
-                distance_km=distance,
-                address=_text(chosen.get("address")) or _text(data.get("address")) or "",
-                location_count=max(len(visible), 1),
-                **schedule,
+            hours = docs.branch_hours(branch, doc, category=category)
+            places.append(
+                BusinessPlace(
+                    id=business_id,
+                    name=docs.text(doc.get("name")),
+                    category=card_category,
+                    categories=cats,
+                    city=docs.text(branch.get("city")) or docs.text(doc.get("city")),
+                    image=_place_image(doc),
+                    distance_km=_distance_between(latitude, longitude, docs.point_doc(branch.get("location"))),
+                    address=docs.text(branch.get("address")) or docs.text(doc.get("address")),
+                    location_count=1,
+                    location_id=str(branch.get("_id")) if branch.get("_id") is not None else None,
+                    **docs.schedule(hours, docs.branch_timezone(branch, doc)),
+                )
             )
-        )
     if not anywhere and latitude is not None and longitude is not None:
-        places.sort(key=lambda place: (place.distance_km is None, place.distance_km or 0))
+        places.sort(key=lambda place: (place.distance_km is None, place.distance_km or 0, place.name.lower(), place.address.lower()))
     else:
-        places.sort(key=lambda place: place.name.lower())
+        places.sort(key=lambda place: (place.name.lower(), place.address.lower()))
     page = places[offset:offset + limit]
     ratings = await _ratings(db, [place.id for place in page])
     if ratings:
-        page = [
-            place.model_copy(update={"rating": ratings.get(place.id)})
-            for place in page
-        ]
+        page = [place.model_copy(update={"rating": ratings.get(place.id)}) for place in page]
     return BusinessPlacePage(items=page, has_more=offset + limit < len(places))
-
-
-def _utc(value: datetime) -> datetime:
-    """Mongo stores UTC without tzinfo. Naive datetimes serialize without Z and phones read them as local."""
-    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 REVIEW_PAGE_SIZE = 15
@@ -872,15 +653,12 @@ async def _place_reviews(
     """Newest reviews first. `cursor` is the last id from the previous page."""
     query: dict = {"business_id": business_id}
     if cursor and is_valid_object_id(cursor):
-        last = await db.business_reviews.find_one(
-            {"_id": ObjectId(cursor), "business_id": business_id}
-        )
+        last = await db.business_reviews.find_one({"_id": ObjectId(cursor), "business_id": business_id})
         created_at = last.get("created_at") if last else None
         if last and isinstance(created_at, datetime):
-            last_id = last["_id"]
             query["$or"] = [
                 {"created_at": {"$lt": created_at}},
-                {"created_at": created_at, "_id": {"$lt": last_id}},
+                {"created_at": created_at, "_id": {"$lt": last["_id"]}},
             ]
     rows = (
         await db.business_reviews.find(query)
@@ -888,19 +666,11 @@ async def _place_reviews(
         .limit(limit)
         .to_list(limit)
     )
-    author_ids = [
-        str(row.get("user_id"))
-        for row in rows
-        if isinstance(row.get("user_id"), str) and row.get("user_id")
-    ]
+    author_ids = [str(row.get("user_id")) for row in rows if isinstance(row.get("user_id"), str) and row.get("user_id")]
     authors: dict[str, dict] = {}
     if author_ids:
         people = await db.users.find({"firebase_uid": {"$in": author_ids}}).to_list(None)
-        authors = {
-            str(person.get("firebase_uid")): person
-            for person in people
-            if person.get("firebase_uid")
-        }
+        authors = {str(person.get("firebase_uid")): person for person in people if person.get("firebase_uid")}
     reviews: list[PlaceReview] = []
     for row in rows:
         rating = row.get("rating")
@@ -914,24 +684,15 @@ async def _place_reviews(
         reviews.append(
             PlaceReview(
                 id=str(row.get("_id")),
-                author_name=_text(author.get("name")) or "",
+                author_name=docs.text(author.get("name")),
                 author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
                 rating=rating,
-                comment=_text(row.get("comment")),
-                created_at=_utc(created_at),
+                comment=docs.optional_text(row.get("comment")),
+                created_at=docs.utc(created_at),
                 is_mine=str(row.get("user_id") or "") == uid,
             )
         )
     return reviews
-
-
-def _phones(doc: dict) -> list[str]:
-    raw = doc.get("phone")
-    if isinstance(raw, list):
-        return [phone.strip() for phone in raw if isinstance(phone, str) and phone.strip()]
-    if isinstance(raw, str) and raw.strip():
-        return [raw.strip()]
-    return []
 
 
 @router.get("/businesses/{business_id}", response_model=BusinessPlaceDetail)
@@ -942,76 +703,87 @@ async def business_place(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """One published listing for the business screen."""
+    """One published business for the business screen, with every live branch."""
     uid = current_user["uid"]
-    try:
-        oid = ObjectId(business_id)
-    except Exception:
+    if not ObjectId.is_valid(business_id):
         raise_api_error(404, ErrorCode.NOT_FOUND)
-    doc = await db.businesses.find_one({"_id": oid, "status": "published"})
+    doc = await db.businesses.find_one({"_id": ObjectId(business_id), "status": "published"})
     if not doc:
         raise_api_error(404, ErrorCode.NOT_FOUND)
-    data = doc_to_dict(doc)
-    branches = public_locations(await ensure_locations(db, doc))
+    branches = docs.public_branches(await docs.ensure_branches(db, doc))
     if latitude is not None and longitude is not None:
         user_country = country_code(latitude, longitude)
         if user_country is not None:
             in_country = []
             for branch in branches:
-                point = branch.get("location") if isinstance(branch.get("location"), dict) else None
-                pair = _point_lat_lng(point)
+                pair = docs.lat_lng(docs.point_doc(branch.get("location")))
                 if pair is not None and country_code(pair[0], pair[1]) == user_country:
                     in_country.append(branch)
             if in_country:
                 branches = in_country
-    business_phone = _phones(doc)
-    public_branches = []
+    business_phone = docs.phones(doc.get("phone"))
+    public = []
+    closest_branch: dict | None = None
     closest = None
     closest_distance = None
     for branch in branches:
-        point = branch.get("location") if isinstance(branch.get("location"), dict) else None
-        distance = _distance_between(latitude, longitude, point)
-        public = place_location(branch, business_phone, distance)
-        public_branches.append(public)
+        distance = _distance_between(latitude, longitude, docs.point_doc(branch.get("location")))
+        listed = docs.place_branch(branch, doc, business_phone, distance)
+        public.append(listed)
         if distance is not None and (closest_distance is None or distance < closest_distance):
-            closest = public
-            closest_distance = distance
-    if closest is None and public_branches:
-        closest = public_branches[0]
-    point = closest.location.model_dump() if closest and closest.location else _location(doc)
-    schedule_doc = doc
-    if closest:
-        match = next((branch for branch in branches if str(branch.get("_id")) == closest.id), None)
-        if match:
-            schedule_doc = match
-    schedule = _schedule(schedule_doc if schedule_doc.get("opening_hours") else doc)
-    ratings = await _ratings(db, [data["id"]])
-    reviews = await _place_reviews(db, data["id"], uid, limit=REVIEW_PAGE_SIZE)
-    location = None
-    if isinstance(point, dict) and isinstance(point.get("coordinates"), list):
-        location = {"type": "Point", "coordinates": point["coordinates"]}
+            closest, closest_branch, closest_distance = listed, branch, distance
+    public.sort(key=lambda item: (item.distance_km is None, item.distance_km or 0))
+    if closest is None and public:
+        closest = public[0]
+        closest_branch = next((row for row in branches if str(row.get("_id")) == closest.id), branches[0])
+    hours = docs.branch_hours(closest_branch, doc) if closest_branch else docs.hours_doc(doc.get("opening_hours"))
+    zone = docs.branch_timezone(closest_branch, doc) if closest_branch else docs.valid_timezone(doc.get("timezone"))
+    ratings = await _ratings(db, [business_id])
+    reviews = await _place_reviews(db, business_id, uid, limit=REVIEW_PAGE_SIZE)
+    categories: list[str] = []
+    for branch in branches:
+        for category in docs.branch_categories(branch, doc, public_only=True):
+            if category not in categories:
+                categories.append(category)
+    primary = categories[0] if categories else (doc.get("category") if doc.get("category") in CATEGORIES else None)
+    if primary is None:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
     return BusinessPlaceDetail(
-        id=data["id"],
-        name=_text(data.get("name")) or "",
-        category=data.get("category"),
+        id=business_id,
+        name=docs.text(doc.get("name")),
+        category=primary,
+        categories=categories,
         image=_place_image(doc),
-        rating=ratings.get(data["id"]),
-        description=_text(data.get("description")),
-        address=closest.address if closest else (_text(data.get("address")) or ""),
+        rating=ratings.get(business_id),
+        description=docs.optional_text(doc.get("description")),
+        address=closest.address if closest else docs.text(doc.get("address")),
         phone=business_phone,
-        website=_text(data.get("website")),
-        instagram=_text(data.get("instagram")),
-        opening_hours=closest.opening_hours if closest else _hours(doc),
-        location=location,
+        website=docs.optional_text(doc.get("website")),
+        instagram=docs.optional_text(doc.get("instagram")),
+        opening_hours=hours,
+        location=closest.location if closest else docs.legacy_point(doc),
         reviews=reviews,
-        locations=public_branches,
-        location_count=max(len(public_branches), 1),
-        distance_km=closest_distance if closest_distance is not None else (
-            closest.distance_km if closest else None
-        ),
-        city=closest.city if closest and closest.city else (_text(data.get("city")) or ""),
-        **schedule,
+        locations=public,
+        location_count=max(len(public), 1),
+        location_id=closest.id if closest else None,
+        distance_km=closest_distance if closest_distance is not None else (closest.distance_km if closest else None),
+        city=closest.city if closest and closest.city else docs.text(doc.get("city")),
+        **docs.schedule(hours, zone),
     )
+
+
+# ---------------------------------------------------------------------------
+# Reviews (pet owners)
+# ---------------------------------------------------------------------------
+
+
+async def _published_or_404(db: AsyncIOMotorDatabase, business_id: str) -> dict:
+    if not ObjectId.is_valid(business_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    business = await db.businesses.find_one({"_id": ObjectId(business_id), "status": "published"})
+    if not business:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    return business
 
 
 @router.get("/businesses/{business_id}/reviews", response_model=list[PlaceReview])
@@ -1023,20 +795,8 @@ async def list_business_reviews(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """One page of reviews, newest first. Pass the last id as `cursor` for the next page."""
-    try:
-        oid = ObjectId(business_id)
-    except Exception:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    business = await db.businesses.find_one({"_id": oid, "status": "published"})
-    if not business:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    return await _place_reviews(
-        db,
-        business_id,
-        current_user["uid"],
-        limit=limit,
-        cursor=cursor,
-    )
+    await _published_or_404(db, business_id)
+    return await _place_reviews(db, business_id, current_user["uid"], limit=limit, cursor=cursor)
 
 
 @router.post("/businesses/{business_id}/reviews", response_model=PlaceReview)
@@ -1047,13 +807,7 @@ async def write_business_review(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """Save this user's rating. A second save updates the same review."""
-    try:
-        oid = ObjectId(business_id)
-    except Exception:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    business = await db.businesses.find_one({"_id": oid, "status": "published"})
-    if not business:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
+    await _published_or_404(db, business_id)
     uid = current_user["uid"]
     now = datetime.now(timezone.utc)
     existing = await db.business_reviews.find_one({"business_id": business_id, "user_id": uid})
@@ -1082,11 +836,11 @@ async def write_business_review(
     photo = author.get("photo_url")
     return PlaceReview(
         id=str(review_id),
-        author_name=_text(author.get("name")) or "",
+        author_name=docs.text(author.get("name")),
         author_photo=photo if isinstance(photo, str) and photo.startswith("https://") else None,
         rating=body.rating,
         comment=body.comment,
-        created_at=_utc(created_at if isinstance(created_at, datetime) else now),
+        created_at=docs.utc(created_at) or now,
         is_mine=True,
     )
 
@@ -1098,16 +852,8 @@ async def delete_business_review(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """Remove this user's review. Someone else's review stays."""
-    try:
-        oid = ObjectId(business_id)
-    except Exception:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    business = await db.businesses.find_one({"_id": oid, "status": "published"})
-    if not business:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    existing = await db.business_reviews.find_one(
-        {"business_id": business_id, "user_id": current_user["uid"]}
-    )
+    await _published_or_404(db, business_id)
+    existing = await db.business_reviews.find_one({"business_id": business_id, "user_id": current_user["uid"]})
     if not existing:
         raise_api_error(404, ErrorCode.NOT_FOUND)
     await db.business_reviews.delete_one({"_id": existing["_id"]})
@@ -1175,34 +921,21 @@ async def report_business_review(
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
     """Email every Ragly admin the review, its author, and the person who reported it."""
-    try:
-        business_oid = ObjectId(business_id)
-        review_oid = ObjectId(review_id)
-    except Exception:
+    business = await _published_or_404(db, business_id)
+    if not ObjectId.is_valid(review_id):
         raise_api_error(404, ErrorCode.NOT_FOUND)
-    business = await db.businesses.find_one({"_id": business_oid, "status": "published"})
-    if not business:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    review = await db.business_reviews.find_one(
-        {"_id": review_oid, "business_id": business_id}
-    )
+    review = await db.business_reviews.find_one({"_id": ObjectId(review_id), "business_id": business_id})
     if not review:
         raise_api_error(404, ErrorCode.NOT_FOUND)
     reporter_uid = current_user["uid"]
     author_uid = str(review.get("user_id") or "")
     if not author_uid or author_uid == reporter_uid:
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
-    people = await db.users.find(
-        {"firebase_uid": {"$in": [reporter_uid, author_uid]}}
-    ).to_list(None)
-    by_uid = {
-        str(person.get("firebase_uid")): person
-        for person in people
-        if person.get("firebase_uid")
-    }
+    people = await db.users.find({"firebase_uid": {"$in": [reporter_uid, author_uid]}}).to_list(None)
+    by_uid = {str(person.get("firebase_uid")): person for person in people if person.get("firebase_uid")}
     now = datetime.now(timezone.utc)
     reason_label = _REPORT_REASON[body.reason]
-    business_name = _text(business.get("name")) or "Business"
+    business_name = docs.text(business.get("name")) or "Business"
     lines = [
         "A pet owner reported a review.",
         "",
@@ -1230,12 +963,7 @@ async def report_business_review(
         "",
         *_person_lines("Review author", author_uid, by_uid.get(author_uid)),
         "",
-        *_person_lines(
-            "Reporter",
-            reporter_uid,
-            by_uid.get(reporter_uid),
-            fallback_email=str(current_user.get("email") or ""),
-        ),
+        *_person_lines("Reporter", reporter_uid, by_uid.get(reporter_uid), fallback_email=str(current_user.get("email") or "")),
     ]
     result = await db.review_reports.insert_one(
         {
@@ -1267,628 +995,114 @@ async def report_business_review(
     _notify_review_report(lines, f"Ragly: review report — {business_name}")
 
 
+# ---------------------------------------------------------------------------
+# Onboarding and business details (owner)
+# ---------------------------------------------------------------------------
+
+
 @router.post("/businesses", response_model=BusinessOut, status_code=201)
-async def submit_business(
-    body: BusinessSubmit,
+async def create_business(
+    body: BusinessDetails,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Create another listing for this account and email the admins."""
-    if settings.is_ragly_admin(current_user.get("email")):
+    """Onboarding: the business itself, as a draft. Branches come next; nothing is sent yet."""
+    if _is_admin(current_user):
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
-    fields = _public_fields(body)
     uid = current_user["uid"]
-    owner_email = (current_user.get("email") or "").strip().lower()
+    owner_email = (current_user.get("email") or "").strip().lower() or None
+    await _ensure_unique_name(db, body.name)
     now = datetime.now(timezone.utc)
-    rejected = await db.businesses.find_one({"owner_uid": uid, "status": "rejected"})
-    await _ensure_unique_name(db, fields["name"], rejected["_id"] if rejected else None)
-    payload = {
-        **fields,
-        "owner_uid": uid,
-        "owner_email": owner_email,
-        "status": "pending_review",
-        "rejection_reason": None,
-        "field_errors": {},
-        "admin_notes": {},
-        "submitted_at": now,
-        "updated_at": now,
-    }
-    if rejected:
-        await db.businesses.update_one({"_id": rejected["_id"]}, {"$set": payload})
-        rejected.update(payload)
-        doc = rejected
-        await _sync_primary_location(db, doc)
-    else:
-        payload["created_at"] = now
-        try:
-            result = await db.businesses.insert_one(payload)
-        except DuplicateKeyError:
-            raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
-        payload["_id"] = result.inserted_id
-        doc = payload
-        await ensure_locations(db, doc)
-
-    _notify_admins(fields, owner_email)
-    listed = await _with_locations(db, _to_out(doc), doc)
-    _email_owner(
-        owner_email,
-        business_name=fields["name"],
-        subject=f"Ragly: {fields['name']} is waiting for review",
-        intro=f"We received {fields['name']}. It stays pending until a Ragly admin approves it.",
+    person = await db.users.find_one({"firebase_uid": uid}) or {}
+    locale = body.locale or docs.text(person.get("locale")).lower()[:2] or "en"
+    doc = docs.build_business(
+        body, status="draft", source="owner", now=now,
+        owner_uid=uid, owner_email=owner_email, locale=locale,
     )
-    return listed
-
-
-@router.post("/admin/businesses", response_model=BusinessOut, status_code=201)
-async def publish_for_owner(
-    body: AdminPublish,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Publish a listing. An owner email, when present, gets an invitation."""
-    admin_email = _require_admin(current_user)
-    fields = _public_fields(body)
-    await _ensure_unique_name(db, fields["name"])
-    owner_email = (body.owner_email or "").strip().lower()
-    now = datetime.now(timezone.utc)
-    payload = {
-        **fields,
-        "status": "published",
-        "rejection_reason": None,
-        "submitted_at": now,
-        "reviewed_at": now,
-        "reviewed_by": admin_email,
-        "created_at": now,
-        "updated_at": now,
-    }
     try:
-        result = await db.businesses.insert_one(payload)
+        result = await db.businesses.insert_one(doc)
     except DuplicateKeyError:
         raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
-    payload["_id"] = result.inserted_id
-    await ensure_locations(db, payload)
-    business = await _with_locations(db, _to_out(payload), payload)
-    if owner_email:
-        invite = await _create_invitation(db, payload, owner_email, "owner", admin_email)
-        business.invitations = [_invite_out(invite, payload["name"])]
-    return business
+    doc["_id"] = result.inserted_id
+    await _upsert_owner_member(db, doc, uid, owner_email, now)
+    await docs.record_event(db, business=doc, kind="business_created", audience="admins", actor=_actor(current_user))
+    return await _full_out(db, doc)
+
+
+async def _apply_details(
+    db: AsyncIOMotorDatabase,
+    business: dict,
+    body: BusinessDetails,
+    current_user: dict,
+) -> BusinessOut:
+    await _ensure_unique_name(db, body.name, business["_id"])
+    now = datetime.now(timezone.utc)
+    updated = docs.build_business(
+        body, status=docs.business_status(business), source="owner", now=now,
+        owner_uid=None, owner_email=None, locale=docs.business_locale(business), existing=business,
+    )
+    changed = {
+        key: updated[key]
+        for key in ("name", "name_key", "phone", "email", "description", "website", "instagram", "locale", "updated_at")
+    }
+    unset = {key: "" for key in ("phones", "latitude", "longitude", "photo_url") if key in business}
+    try:
+        await db.businesses.update_one(
+            {"_id": business["_id"]},
+            {"$set": changed, **({"$unset": unset} if unset else {})},
+        )
+    except DuplicateKeyError:
+        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
+    for key in unset:
+        business.pop(key, None)
+    business.update(changed)
+    await docs.record_event(
+        db, business=business, kind="business_updated",
+        audience="owner" if _is_admin(current_user) else "admins",
+        actor=_actor(current_user),
+    )
+    return await _full_out(db, business)
+
+
+@router.patch("/businesses/{business_id}", response_model=BusinessOut)
+async def owner_update_business(
+    business_id: str,
+    body: BusinessDetails,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Edit the business itself: name, contacts, about. Branches are edited separately."""
+    business = await _business_or_404(db, business_id)
+    if not await _listing_owner(db, business, current_user["uid"]):
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+    return await _apply_details(db, business, body, current_user)
 
 
 @router.patch("/admin/businesses/{business_id}", response_model=BusinessOut)
-async def update_business(
+async def admin_update_business(
     business_id: str,
-    body: BusinessSubmit,
+    body: BusinessDetails,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Replace the public listing fields. Ownership and status stay as they are."""
+    """Admins edit the same fields an owner can. Status and ownership stay."""
     _require_admin(current_user)
-    if not ObjectId.is_valid(business_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    doc = await db.businesses.find_one({"_id": ObjectId(business_id)})
-    if not doc:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    now = datetime.now(timezone.utc)
-    fields = _public_fields(body)
-    await _ensure_unique_name(db, fields["name"], doc["_id"])
-    fields["updated_at"] = now
-    unset = {"phones": "", "latitude": "", "longitude": "", "photo_url": ""}
-    if "instagram" not in fields:
-        unset["instagram"] = ""
-    try:
-        await db.businesses.update_one(
-            {"_id": doc["_id"]},
-            {"$set": fields, "$unset": unset},
-        )
-    except DuplicateKeyError:
-        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
-    doc.update(fields)
-    if "instagram" not in fields:
-        doc.pop("instagram", None)
-    doc.pop("phones", None)
-    doc.pop("latitude", None)
-    doc.pop("longitude", None)
-    doc.pop("photo_url", None)
-    await _sync_primary_location(db, doc)
-    return await _with_locations(db, _to_out(doc), doc)
-
-
-async def _decorate(db: AsyncIOMotorDatabase, docs: list[dict]) -> list[BusinessOut]:
-    businesses = [_to_out(doc) for doc in docs]
-    business_ids = [business.id for business in businesses]
-    invitations = await _load_invitations(db, business_ids)
-    owner_ids = await _owner_business_ids(db, business_ids)
-    grouped = await locations_for(db, business_ids)
-    decorated = []
-    for business in businesses:
-        business.locations = [location_out(row) for row in grouped.get(business.id, [])]
-        decorated.append(_apply_team(business, invitations.get(business.id, []), owner_ids))
-    return decorated
-
-
-def _page_match(
-    status: str | None,
-    category: str | None,
-    q: str | None,
-    ownership: str,
-    owner_oids: list[ObjectId],
-) -> dict:
-    clauses: list[dict] = []
-    if status == "reviewed":
-        clauses.append({"status": {"$in": ["published", "rejected"]}})
-    elif status:
-        clauses.append({"status": status})
-    if category:
-        clauses.append({"category": category})
-    text = (q or "").strip()
-    if text:
-        pattern = re.escape(text)
-        clauses.append(
-            {
-                "$or": [
-                    {"name": {"$regex": pattern, "$options": "i"}},
-                    {"city": {"$regex": pattern, "$options": "i"}},
-                    {"address": {"$regex": pattern, "$options": "i"}},
-                ]
-            }
-        )
-    if ownership == "owned":
-        clauses.append(
-            {"$or": [{"owner_uid": {"$type": "string"}}, {"_id": {"$in": owner_oids}}]}
-        )
-    elif ownership == "unowned":
-        clauses.append({"owner_uid": {"$not": {"$type": "string"}}})
-        clauses.append({"_id": {"$nin": owner_oids}})
-    if not clauses:
-        return {}
-    if len(clauses) == 1:
-        return clauses[0]
-    return {"$and": clauses}
-
-
-@router.get("/admin/businesses/summary", response_model=BusinessCounts)
-async def business_summary(
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Counts for the admin dashboard. Deleted includes owner and admin removals."""
-    _require_admin(current_user)
-    counts = {"pending_review": 0, "published": 0, "rejected": 0}
-    rows = await db.businesses.aggregate(
-        [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
-    ).to_list(None)
-    for row in rows:
-        if row.get("_id") in counts:
-            counts[row["_id"]] = row["n"]
-    deleted = await db.business_deletions.count_documents({})
-    return BusinessCounts(
-        pending=counts["pending_review"],
-        published=counts["published"],
-        rejected=counts["rejected"],
-        deleted=deleted,
-    )
-
-
-@router.get("/admin/locations", response_model=list[StoreReview])
-async def admin_locations(
-    status: Literal["pending_review", "published", "rejected"] = "pending_review",
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Branches an owner added. They stay off the app until an admin approves them."""
-    _require_admin(current_user)
-    rows = await db.business_locations.find({"status": status}).sort("_id", 1).to_list(None)
-    business_ids = [
-        ObjectId(row["business_id"])
-        for row in rows
-        if ObjectId.is_valid(str(row.get("business_id")))
-    ]
-    names: dict[str, str] = {}
-    if business_ids:
-        businesses = await db.businesses.find({"_id": {"$in": business_ids}}).to_list(None)
-        names = {str(business["_id"]): business.get("name") or "" for business in businesses}
-    reviews: list[StoreReview] = []
-    for row in rows:
-        listed = location_out(row)
-        reviews.append(
-            StoreReview(
-                id=listed.id,
-                business_id=listed.business_id,
-                business_name=names.get(listed.business_id, ""),
-                address=listed.address,
-                city=listed.city,
-                phone=listed.phone,
-                opening_hours=listed.opening_hours,
-                status=listed.status,
-                rejection_reason=listed.rejection_reason,
-            )
-        )
-    return reviews
-
-
-async def _pending_location(db: AsyncIOMotorDatabase, location_id: str) -> dict:
-    if not ObjectId.is_valid(location_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    row = await db.business_locations.find_one({"_id": ObjectId(location_id)})
-    if not row or location_status(row) != "pending_review":
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    return row
-
-
-@router.post("/admin/locations/{location_id}/approve", response_model=LocationOut)
-async def approve_location(
-    location_id: str,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Publish a branch. Pet owners can see it after this."""
-    _require_admin(current_user)
-    row = await _pending_location(db, location_id)
-    now = datetime.now(timezone.utc)
-    await db.business_locations.update_one(
-        {"_id": row["_id"]},
-        {"$set": {"status": "published", "rejection_reason": None, "reviewed_at": now, "updated_at": now}},
-    )
-    row["status"] = "published"
-    row["rejection_reason"] = None
-    row["reviewed_at"] = now
-    return location_out(row)
-
-
-@router.post("/admin/locations/{location_id}/reject", response_model=LocationOut)
-async def reject_location(
-    location_id: str,
-    body: StoreReject,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Keep a branch off the app and show the owner the note."""
-    _require_admin(current_user)
-    row = await _pending_location(db, location_id)
-    now = datetime.now(timezone.utc)
-    await db.business_locations.update_one(
-        {"_id": row["_id"]},
-        {"$set": {"status": "rejected", "rejection_reason": body.reason, "updated_at": now}},
-    )
-    row["status"] = "rejected"
-    row["rejection_reason"] = body.reason
-    return location_out(row)
-
-
-@router.get("/admin/businesses/page", response_model=BusinessPage)
-async def page_businesses(
-    limit: int = Query(default=20, ge=1, le=50),
-    skip: int = Query(default=0, ge=0),
-    status: str | None = None,
-    category: str | None = None,
-    q: str | None = None,
-    ownership: Literal["all", "owned", "unowned"] = "all",
-    sort: Literal["category", "name", "city", "recent"] = "category",
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """One page of listings. The next page is requested as the list scrolls."""
-    _require_admin(current_user)
-    allowed_status = {"pending_review", "published", "rejected", "suspended", "reviewed"}
-    allowed_category = {"veterinarian", "groomer", "pharmacy", "pet_friendly", "pet_store"}
-    if status and status not in allowed_status:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    if category and category not in allowed_category:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    owner_oids: list[ObjectId] = []
-    if ownership != "all":
-        rows = await db.business_members.find({"role": "owner"}, {"business_id": 1}).to_list(None)
-        for row in rows:
-            business_id = str(row.get("business_id") or "")
-            if ObjectId.is_valid(business_id):
-                owner_oids.append(ObjectId(business_id))
-    match = _page_match(status, category, q, ownership, owner_oids)
-    if sort == "name":
-        sort_spec = [("name", 1), ("_id", 1)]
-    elif sort == "city":
-        sort_spec = [("city", 1), ("name", 1), ("_id", 1)]
-    elif sort == "recent":
-        sort_spec = [("updated_at", -1), ("_id", -1)]
-    else:
-        sort_spec = None
-    if sort_spec is None:
-        pipeline = [
-            *([{"$match": match}] if match else []),
-            {
-                "$addFields": {
-                    "_rank": {
-                        "$switch": {
-                            "branches": [
-                                {"case": {"$eq": ["$category", "veterinarian"]}, "then": 0},
-                                {"case": {"$eq": ["$category", "groomer"]}, "then": 1},
-                                {"case": {"$eq": ["$category", "pharmacy"]}, "then": 2},
-                                {"case": {"$eq": ["$category", "pet_friendly"]}, "then": 3},
-                                {"case": {"$eq": ["$category", "pet_store"]}, "then": 4},
-                            ],
-                            "default": 9,
-                        }
-                    }
-                }
-            },
-            {"$sort": {"_rank": 1, "name": 1, "_id": 1}},
-            {"$skip": skip},
-            {"$limit": limit + 1},
-        ]
-        docs = await db.businesses.aggregate(pipeline).to_list(None)
-    else:
-        docs = await db.businesses.find(match).sort(sort_spec).skip(skip).limit(limit + 1).to_list(None)
-    has_more = len(docs) > limit
-    return BusinessPage(items=await _decorate(db, docs[:limit]), has_more=has_more)
-
-
-@router.get("/admin/businesses", response_model=list[BusinessOut])
-async def list_businesses_for_review(
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Pending requests first, then the rest. Admins only."""
-    _require_admin(current_user)
-    docs = await db.businesses.find({}).sort("submitted_at", -1).to_list(None)
-    order = {"pending_review": 0, "rejected": 1, "published": 2, "suspended": 3}
-    docs.sort(key=lambda doc: (order.get(doc.get("status"), 9),))
-    return await _decorate(db, docs)
-
-
-async def _business_or_404(db: AsyncIOMotorDatabase, business_id: str) -> dict:
-    if not ObjectId.is_valid(business_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    doc = await db.businesses.find_one({"_id": ObjectId(business_id)})
-    if not doc:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    return doc
-
-
-@router.post("/admin/businesses/{business_id}/invitations", response_model=InvitationOut, status_code=201)
-async def admin_invite_owner(
-    business_id: str,
-    body: OwnerInvite,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Email someone a request to become the owner. Membership waits for their approval."""
-    admin_email = _require_admin(current_user)
     business = await _business_or_404(db, business_id)
-    invite = await _create_invitation(db, business, body.email, "owner", admin_email)
-    return _invite_out(invite, business.get("name") or "")
+    return await _apply_details(db, business, body, current_user)
 
 
-async def _brand_owner(db: AsyncIOMotorDatabase, business: dict, current_user: dict) -> bool:
-    if settings.is_ragly_admin(current_user.get("email")):
-        return True
-    return await _listing_owner(db, business, current_user["uid"])
-
-
-@router.post("/businesses/{business_id}/locations", response_model=LocationOut, status_code=201)
-async def add_location(
+@router.delete("/businesses/{business_id}", status_code=204)
+async def owner_delete_business(
     business_id: str,
-    body: LocationWrite,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Add a branch. The brand owner and Ragly admins can do this."""
+    """Only an owner member can delete the business. A worker cannot."""
     business = await _business_or_404(db, business_id)
-    if not await _brand_owner(db, business, current_user):
+    member = await db.business_members.find_one({"business_id": str(business["_id"]), "user_id": current_user["uid"]})
+    if not member or member.get("role") != "owner":
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
-    try:
-        ZoneInfo(body.timezone.strip())
-    except ZoneInfoNotFoundError:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    now = datetime.now(timezone.utc)
-    doc = {
-        **location_payload(body),
-        "business_id": str(business["_id"]),
-        "status": "pending_review",
-        "rejection_reason": None,
-        "created_at": now,
-        "updated_at": now,
-    }
-    result = await db.business_locations.insert_one(doc)
-    doc["_id"] = result.inserted_id
-    return location_out(doc)
-
-
-@router.patch("/businesses/{business_id}/locations/{location_id}", response_model=LocationOut)
-async def update_location(
-    business_id: str,
-    location_id: str,
-    body: LocationWrite,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Edit one branch. Its store manager can edit that branch only."""
-    business = await _business_or_404(db, business_id)
-    if not ObjectId.is_valid(location_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    row = await db.business_locations.find_one(
-        {"_id": ObjectId(location_id), "business_id": str(business["_id"])}
-    )
-    if not row:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    if not await _brand_owner(db, business, current_user):
-        member = await db.business_members.find_one(
-            {
-                "business_id": str(business["_id"]),
-                "user_id": current_user["uid"],
-                "role": "branch_owner",
-                "location_id": location_id,
-            }
-        )
-        if not member:
-            raise_api_error(403, ErrorCode.UNAUTHORIZED)
-    try:
-        ZoneInfo(body.timezone.strip())
-    except ZoneInfoNotFoundError:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    fields = {**location_payload(body), "updated_at": datetime.now(timezone.utc)}
-    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": fields})
-    row.update(fields)
-    rows = await list_location_docs(db, str(business["_id"]))
-    if rows and rows[0]["_id"] == row["_id"]:
-        mirrored = mirror_fields(row)
-        mirrored["updated_at"] = fields["updated_at"]
-        await db.businesses.update_one({"_id": business["_id"]}, {"$set": mirrored})
-    return location_out(row)
-
-
-@router.delete("/businesses/{business_id}/locations/{location_id}", status_code=204)
-async def delete_location(
-    business_id: str,
-    location_id: str,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Remove a branch. The last branch stays, because a business needs an address."""
-    business = await _business_or_404(db, business_id)
-    if not await _brand_owner(db, business, current_user):
-        raise_api_error(403, ErrorCode.UNAUTHORIZED)
-    if not ObjectId.is_valid(location_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    rows = await list_location_docs(db, str(business["_id"]))
-    target = next((row for row in rows if str(row.get("_id")) == location_id), None)
-    if target is None:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    published = [row for row in rows if location_status(row) == "published"]
-    if location_status(target) == "published" and len(published) <= 1:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    if len(rows) <= 1:
-        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-    await db.business_locations.delete_one(
-        {"_id": ObjectId(location_id), "business_id": str(business["_id"])}
-    )
-    return None
-
-
-@router.post("/businesses/{business_id}/invitations", response_model=InvitationOut, status_code=201)
-async def owner_invite_member(
-    business_id: str,
-    body: TeamInvite,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Invite an owner for every branch, or a store manager, lead, or staff for one branch."""
-    business = await _business_or_404(db, business_id)
-    uid = current_user["uid"]
-    is_owner = await _brand_owner(db, business, current_user)
-    location_id = (body.location_id or "").strip() or None
-    reports_to = (body.reports_to or "").strip() or None
-    if body.role == "owner":
-        if not is_owner:
-            raise_api_error(403, ErrorCode.UNAUTHORIZED)
-        location_id = None
-        reports_to = None
-    else:
-        if not location_id:
-            rows = await ensure_locations(db, business)
-            location_id = str(rows[0]["_id"]) if rows else None
-        if not location_id or not ObjectId.is_valid(location_id):
-            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-        branch = await db.business_locations.find_one(
-            {"_id": ObjectId(location_id), "business_id": str(business["_id"])}
-        )
-        if not branch:
-            raise_api_error(404, ErrorCode.NOT_FOUND)
-        if location_status(branch) != "published":
-            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-        if not is_owner:
-            mine = await db.business_members.find(
-                {"business_id": str(business["_id"]), "user_id": uid, "location_id": location_id}
-            ).to_list(None)
-            roles = {row.get("role") for row in mine}
-            if body.role == "branch_owner" or not roles.intersection({"branch_owner", "lead"}):
-                raise_api_error(403, ErrorCode.UNAUTHORIZED)
-            if "lead" in roles and "branch_owner" not in roles:
-                reports_to = reports_to or uid
-    invite = await _create_invitation(
-        db,
-        business,
-        body.email,
-        body.role,
-        (current_user.get("email") or "").strip().lower(),
-        location_id,
-        reports_to,
-    )
-    return _invite_out(invite, business.get("name") or "")
-
-
-@router.post("/businesses/invitations/{invitation_id}/approve", response_model=InvitationOut)
-async def approve_invitation(
-    invitation_id: str,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """The invited person accepts and becomes a business_members row."""
-    return await _respond_invitation(invitation_id, current_user, db, accepted=True)
-
-
-@router.post("/businesses/invitations/{invitation_id}/decline", response_model=InvitationOut)
-async def decline_invitation(
-    invitation_id: str,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """The invited person declines. No membership is created."""
-    return await _respond_invitation(invitation_id, current_user, db, accepted=False)
-
-
-async def _respond_invitation(
-    invitation_id: str,
-    current_user: dict,
-    db: AsyncIOMotorDatabase,
-    *,
-    accepted: bool,
-) -> InvitationOut:
-    if not ObjectId.is_valid(invitation_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    invite = await db.business_invitations.find_one({"_id": ObjectId(invitation_id)})
-    if not invite:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    email = (current_user.get("email") or "").strip().lower()
-    if invite.get("email") != email:
-        raise_api_error(403, ErrorCode.UNAUTHORIZED)
-    if invite.get("status") != "pending":
-        raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
-    business = await _business_or_404(db, str(invite.get("business_id")))
-    now = datetime.now(timezone.utc)
-    status = "approved" if accepted else "declined"
-    await db.business_invitations.update_one(
-        {"_id": invite["_id"]},
-        {"$set": {"status": status, "updated_at": now, "responded_at": now}},
-    )
-    invite["status"] = status
-    if accepted:
-        uid = current_user["uid"]
-        location_id = _text(invite.get("location_id"))
-        await db.business_members.update_one(
-            {
-                "business_id": str(business["_id"]),
-                "user_id": uid,
-                "location_id": location_id,
-            },
-            {
-                "$set": {
-                    "business_id": str(business["_id"]),
-                    "user_id": uid,
-                    "email": email,
-                    "role": invite.get("role"),
-                    "location_id": location_id,
-                    "reports_to": _text(invite.get("reports_to")),
-                    "updated_at": now,
-                },
-                "$setOnInsert": {"created_at": now},
-            },
-            upsert=True,
-        )
-        if invite.get("role") == "owner" and not business.get("owner_uid"):
-            await db.businesses.update_one(
-                {"_id": business["_id"]},
-                {"$set": {"owner_uid": uid, "owner_email": email, "updated_at": now}},
-            )
-    return _invite_out(invite, business.get("name") or "")
+    await _delete_business(db, business)
 
 
 @router.delete("/admin/businesses/{business_id}", status_code=204)
@@ -1897,9 +1111,129 @@ async def admin_delete_business(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Ragly admins can remove a listing, its members, and its invitations."""
+    """Ragly admins can remove a business, its branches, members, and invitations."""
     _require_admin(current_user)
     await _delete_business(db, await _business_or_404(db, business_id))
+
+
+# ---------------------------------------------------------------------------
+# Logo and gallery
+# ---------------------------------------------------------------------------
+
+
+async def _read_image(file: UploadFile) -> tuple[bytes, str]:
+    content = await file.read(_MAX_PHOTO_BYTES + 1)
+    identified = identify_image(content) if content and len(content) <= _MAX_PHOTO_BYTES else None
+    if identified is None:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    return content, identified[0]
+
+
+def _upload(business_id: str, content: bytes, content_type: str) -> str:
+    try:
+        return upload_business_image(business_id, content, content_type)
+    except Exception:
+        logger.exception("Business photo upload failed for %s", business_id)
+        raise_api_error(500, ErrorCode.FAILED_TO_SAVE)
+
+
+def _forget_image(business_id: str, url: str | None) -> None:
+    if not url or not url.startswith("https://"):
+        return
+    try:
+        delete_business_image(business_id, url)
+    except Exception:
+        logger.exception("Business photo delete failed for %s", business_id)
+
+
+async def _set_logo(db: AsyncIOMotorDatabase, business: dict, file: UploadFile) -> BusinessOut:
+    content, content_type = await _read_image(file)
+    url = _upload(str(business["_id"]), content, content_type)
+    previous = docs.logo(business)
+    now = datetime.now(timezone.utc)
+    await db.businesses.update_one(
+        {"_id": business["_id"]},
+        {"$set": {"photo": url, "updated_at": now}, "$unset": {"photo_url": ""}},
+    )
+    business.pop("photo_url", None)
+    business["photo"] = url
+    business["updated_at"] = now
+    if previous and previous != url and previous not in docs.gallery(business):
+        _forget_image(str(business["_id"]), previous)
+    return await _full_out(db, business)
+
+
+async def _clear_logo(db: AsyncIOMotorDatabase, business: dict) -> BusinessOut:
+    previous = docs.logo(business)
+    now = datetime.now(timezone.utc)
+    await db.businesses.update_one(
+        {"_id": business["_id"]},
+        {"$set": {"photo": None, "updated_at": now}, "$unset": {"photo_url": ""}},
+    )
+    business.pop("photo_url", None)
+    business["photo"] = None
+    business["updated_at"] = now
+    if previous and previous not in docs.gallery(business):
+        _forget_image(str(business["_id"]), previous)
+    return await _full_out(db, business)
+
+
+async def _add_business_photo(db: AsyncIOMotorDatabase, business: dict, file: UploadFile) -> BusinessOut:
+    content, content_type = await _read_image(file)
+    photos = docs.gallery(business)
+    if len(photos) >= docs.MAX_PHOTOS:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    url = _upload(str(business["_id"]), content, content_type)
+    photos.append(url)
+    now = datetime.now(timezone.utc)
+    await db.businesses.update_one({"_id": business["_id"]}, {"$set": {"photos": photos, "updated_at": now}})
+    business["photos"] = photos
+    business["updated_at"] = now
+    return await _full_out(db, business)
+
+
+async def _remove_business_photo(db: AsyncIOMotorDatabase, business: dict, url: str) -> BusinessOut:
+    url = url.strip()
+    photos = docs.gallery(business)
+    photo = docs.logo(business)
+    if url not in photos and photo != url:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    photos = [item for item in photos if item != url]
+    now = datetime.now(timezone.utc)
+    update: dict = {"photos": photos, "updated_at": now}
+    if photo == url:
+        update["photo"] = None
+        business["photo"] = None
+        business.pop("photo_url", None)
+    await db.businesses.update_one({"_id": business["_id"]}, {"$set": update, "$unset": {"photo_url": ""}})
+    business["photos"] = photos
+    business["updated_at"] = now
+    _forget_image(str(business["_id"]), url)
+    return await _full_out(db, business)
+
+
+@router.post("/businesses/{business_id}/logo", response_model=BusinessOut)
+async def owner_set_logo(
+    business_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """The business logo shown on the dashboard and as the listing image."""
+    business = await _business_or_404(db, business_id)
+    await _require_brand_owner(db, business, current_user)
+    return await _set_logo(db, business, file)
+
+
+@router.delete("/businesses/{business_id}/logo", response_model=BusinessOut)
+async def owner_clear_logo(
+    business_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    business = await _business_or_404(db, business_id)
+    await _require_brand_owner(db, business, current_user)
+    return await _clear_logo(db, business)
 
 
 @router.post("/admin/businesses/{business_id}/photos", response_model=BusinessOut)
@@ -1954,58 +1288,534 @@ async def owner_remove_business_photo(
     return await _remove_business_photo(db, business, body.url)
 
 
-@router.delete("/businesses/{business_id}", status_code=204)
-async def owner_delete_business(
-    business_id: str,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    """Only an owner member can delete the business. A worker cannot."""
-    business = await _business_or_404(db, business_id)
+# ---------------------------------------------------------------------------
+# Branches (owner and admin)
+# ---------------------------------------------------------------------------
+
+
+def _pin_timezone(body: BranchWrite) -> str | None:
+    if body.location is None:
+        return None
+    longitude, latitude = body.location.coordinates
+    return timezone_at(latitude, longitude)
+
+
+def _build_branch_or_400(business: dict, body: BranchWrite, **kwargs) -> dict:
+    try:
+        return docs.build_branch(business, body, timezone_name=_pin_timezone(body), **kwargs)
+    except docs.HoursError:
+        raise_api_error(400, ErrorCode.BRANCH_HOURS_INVALID)
+
+
+def _require_complete(branch: dict, business: dict) -> None:
+    missing = docs.branch_missing(branch, business)
+    if missing:
+        raise_api_error_with(400, ErrorCode.BRANCH_INCOMPLETE, {"fields": missing})
+
+
+async def _branch_editor(db: AsyncIOMotorDatabase, business: dict, location_id: str, current_user: dict) -> None:
+    """Brand owners and admins edit any branch; a store manager edits their own."""
+    if await _brand_owner(db, business, current_user):
+        return
     member = await db.business_members.find_one(
-        {"business_id": str(business["_id"]), "user_id": current_user["uid"]}
+        {
+            "business_id": str(business["_id"]),
+            "user_id": current_user["uid"],
+            "role": "branch_owner",
+            "location_id": location_id,
+        }
     )
-    if not member or member.get("role") != "owner":
+    if not member:
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
-    await _delete_business(db, business)
 
 
-@router.patch("/businesses/{business_id}", response_model=BusinessOut)
-async def owner_update_business(
+@router.post("/businesses/{business_id}/locations", response_model=LocationOut, status_code=201)
+async def add_branch(
     business_id: str,
-    body: BusinessSubmit,
+    body: BranchWrite,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Owners can edit the public listing. A rejected listing goes back to review."""
+    """Save a branch. For owners it is a draft until they send it; admins publish at once."""
     business = await _business_or_404(db, business_id)
-    if not await _listing_owner(db, business, current_user["uid"]):
+    await _require_brand_owner(db, business, current_user)
+    admin = _is_admin(current_user)
+    rows = await docs.list_branches(db, str(business["_id"]))
+    now = datetime.now(timezone.utc)
+    doc = _build_branch_or_400(
+        business, body,
+        status="published" if admin else "draft",
+        source="admin" if admin else "owner",
+        now=now, is_main=not rows,
+    )
+    if admin:
+        _require_complete(doc, business)
+        doc["reviewed_at"] = now
+        doc["reviewed_by"] = (current_user.get("email") or "").strip().lower()
+    result = await db.business_locations.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    await docs.sync_business(db, business)
+    await docs.record_event(
+        db, business=business, branch=doc,
+        kind="branch_published" if admin else "branch_created",
+        audience="owner" if admin else "admins", actor=_actor(current_user),
+    )
+    return docs.branch_out(doc, business)
+
+
+@router.patch("/businesses/{business_id}/locations/{location_id}", response_model=LocationOut)
+async def update_branch(
+    business_id: str,
+    location_id: str,
+    body: BranchWrite,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Edit one branch. A live branch keeps its address and pin; a new service on it waits for review."""
+    business = await _business_or_404(db, business_id)
+    row = await _branch_or_404(db, business, location_id)
+    await _branch_editor(db, business, location_id, current_user)
+    admin = _is_admin(current_user)
+    status = docs.branch_status(row)
+    if status == "published" and not admin:
+        same_address = body.address.strip() == docs.text(row.get("address"))
+        same_point = (body.location.model_dump() if body.location else None) == docs.point_doc(row.get("location"))
+        if not same_address or not same_point:
+            raise_api_error(409, ErrorCode.BRANCH_NOT_EDITABLE)
+    now = datetime.now(timezone.utc)
+    doc = _build_branch_or_400(
+        business, body, status=status, source="admin" if admin else "owner",
+        now=now, is_main=bool(row.get("is_main")), existing=row,
+    )
+    if admin:
+        for service in doc["services"]:
+            if service["status"] == "pending_review":
+                service["status"] = status
+        doc["opening_hours"] = doc["services"][0]["opening_hours"] if doc["services"] else doc["opening_hours"]
+    if status == "published":
+        _require_complete(doc, business)
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": {k: v for k, v in doc.items() if k != "_id"}})
+    await docs.sync_business(db, business)
+    pending_services = [service["category"] for service in doc["services"] if service["status"] == "pending_review"]
+    await docs.record_event(
+        db, business=business, branch=doc, kind="branch_updated",
+        audience="owner" if admin else "admins", actor=_actor(current_user),
+        message=", ".join(pending_services) or None,
+    )
+    if pending_services and status == "published" and not admin:
+        owner_email = (current_user.get("email") or "").strip().lower()
+        _notify_admins(business, doc, owner_email)
+    return docs.branch_out(doc, business)
+
+
+@router.post("/businesses/{business_id}/locations/{location_id}/send", response_model=LocationOut)
+async def send_branch(
+    business_id: str,
+    location_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Send a draft or returned branch for review. Admins hear about it; the owner gets a receipt."""
+    business = await _business_or_404(db, business_id)
+    row = await _branch_or_404(db, business, location_id)
+    await _require_brand_owner(db, business, current_user)
+    status = docs.branch_status(row)
+    if status not in {"draft", "rejected"}:
+        raise_api_error(400, ErrorCode.BRANCH_NOT_PENDING)
+    _require_complete(row, business)
+    now = datetime.now(timezone.utc)
+    services = docs.services_of(row, business)
+    for service in services:
+        if service["status"] != "published":
+            service["status"] = "pending_review"
+            service["updated_at"] = now
+    update = {
+        "status": "pending_review",
+        "services": services,
+        "field_errors": {},
+        "rejection_reason": None,
+        "submitted_at": now,
+        "updated_at": now,
+    }
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": update})
+    row.update(update)
+    await docs.sync_business(db, business)
+    owner_email = (current_user.get("email") or "").strip().lower()
+    await docs.record_event(db, business=business, branch=row, kind="branch_sent", audience="admins", actor=_actor(current_user))
+    _notify_admins(business, row, owner_email)
+    email, locale = await _owner_contact(db, business)
+    send_owner_update(
+        email or owner_email, kind="received", locale=locale,
+        business_name=docs.text(business.get("name")), address=docs.text(row.get("address")),
+    )
+    return docs.branch_out(row, business)
+
+
+@router.post("/businesses/{business_id}/locations/{location_id}/withdraw", response_model=LocationOut)
+async def withdraw_branch(
+    business_id: str,
+    location_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Take a waiting branch back to draft to keep editing it."""
+    business = await _business_or_404(db, business_id)
+    row = await _branch_or_404(db, business, location_id)
+    await _require_brand_owner(db, business, current_user)
+    if docs.branch_status(row) != "pending_review":
+        raise_api_error(400, ErrorCode.BRANCH_NOT_PENDING)
+    now = datetime.now(timezone.utc)
+    services = docs.services_of(row, business)
+    for service in services:
+        if service["status"] == "pending_review":
+            service["status"] = "draft"
+            service["updated_at"] = now
+    update = {"status": "draft", "services": services, "updated_at": now}
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": update})
+    row.update(update)
+    await docs.sync_business(db, business)
+    await docs.record_event(db, business=business, branch=row, kind="branch_withdrawn", audience="admins", actor=_actor(current_user))
+    return docs.branch_out(row, business)
+
+
+@router.patch("/businesses/{business_id}/locations/{location_id}/visibility", response_model=LocationOut)
+async def set_branch_visibility(
+    business_id: str,
+    location_id: str,
+    body: BranchVisibility,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Pause or resume a live branch in the app without deleting it."""
+    business = await _business_or_404(db, business_id)
+    row = await _branch_or_404(db, business, location_id)
+    await _require_brand_owner(db, business, current_user)
+    admin = _is_admin(current_user)
+    if not admin and row.get("hidden_by") == "admin" and body.visible:
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
     now = datetime.now(timezone.utc)
-    fields = _public_fields(body)
-    await _ensure_unique_name(db, fields["name"], business["_id"])
-    fields["updated_at"] = now
-    if business.get("status") == "rejected":
-        fields["status"] = "pending_review"
-        fields["field_errors"] = {}
-        fields["admin_notes"] = {}
-        fields["rejection_reason"] = None
-        fields["submitted_at"] = now
-    unset = {"phones": "", "latitude": "", "longitude": "", "photo_url": ""}
-    if "instagram" not in fields:
-        unset["instagram"] = ""
-    try:
-        await db.businesses.update_one({"_id": business["_id"]}, {"$set": fields, "$unset": unset})
-    except DuplicateKeyError:
-        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
-    business.update(fields)
-    if "instagram" not in fields:
-        business.pop("instagram", None)
-    await _sync_primary_location(db, business)
-    updated = await _with_locations(db, _to_out(business), business)
-    invitations = await _load_invitations(db, [updated.id])
-    owner_ids = await _owner_business_ids(db, [updated.id])
-    return _apply_team(updated, invitations.get(updated.id, []), owner_ids)
+    update = {
+        "visible": body.visible,
+        "hidden_reason": None if body.visible else docs.optional_text(body.reason),
+        "hidden_by": None if body.visible else ("admin" if admin else "owner"),
+        "updated_at": now,
+    }
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": update})
+    row.update(update)
+    await docs.sync_business(db, business)
+    await docs.record_event(
+        db, business=business, branch=row, kind="branch_resumed" if body.visible else "branch_paused",
+        audience="owner" if admin else "admins", actor=_actor(current_user), message=update["hidden_reason"],
+    )
+    return docs.branch_out(row, business)
+
+
+@router.delete("/businesses/{business_id}/locations/{location_id}", status_code=204)
+async def delete_branch(
+    business_id: str,
+    location_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Remove a branch. If it was the main one, the next branch becomes main."""
+    business = await _business_or_404(db, business_id)
+    row = await _branch_or_404(db, business, location_id)
+    await _require_brand_owner(db, business, current_user)
+    await db.business_locations.delete_one({"_id": row["_id"]})
+    _forget_image(str(business["_id"]), docs.clean_photo(row.get("photo")))
+    await docs.sync_business(db, business)
+    await docs.record_event(db, business=business, branch=row, kind="branch_deleted", audience="admins", actor=_actor(current_user))
+    return None
+
+
+@router.post("/businesses/{business_id}/locations/{location_id}/photo", response_model=LocationOut)
+async def set_branch_photo(
+    business_id: str,
+    location_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """One photo of the branch itself."""
+    business = await _business_or_404(db, business_id)
+    row = await _branch_or_404(db, business, location_id)
+    await _branch_editor(db, business, location_id, current_user)
+    content, content_type = await _read_image(file)
+    url = _upload(str(business["_id"]), content, content_type)
+    previous = docs.clean_photo(row.get("photo"))
+    now = datetime.now(timezone.utc)
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": {"photo": url, "updated_at": now}})
+    row["photo"] = url
+    row["updated_at"] = now
+    if previous and previous != url:
+        _forget_image(str(business["_id"]), previous)
+    return docs.branch_out(row, business)
+
+
+@router.delete("/businesses/{business_id}/locations/{location_id}/photo", response_model=LocationOut)
+async def clear_branch_photo(
+    business_id: str,
+    location_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    business = await _business_or_404(db, business_id)
+    row = await _branch_or_404(db, business, location_id)
+    await _branch_editor(db, business, location_id, current_user)
+    previous = docs.clean_photo(row.get("photo"))
+    now = datetime.now(timezone.utc)
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": {"photo": None, "updated_at": now}})
+    row["photo"] = None
+    row["updated_at"] = now
+    _forget_image(str(business["_id"]), previous)
+    return docs.branch_out(row, business)
+
+
+@router.get("/businesses/{business_id}/events", response_model=list[EventOut])
+async def business_events(
+    business_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """What happened to this business, newest first. Admins see everything; owners see their side."""
+    business = await _business_or_404(db, business_id)
+    await _require_brand_owner(db, business, current_user)
+    query: dict = {"business_id": str(business["_id"])}
+    if not _is_admin(current_user):
+        query["audience"] = "owner"
+    rows = await db.business_events.find(query).sort([("created_at", -1), ("_id", -1)]).limit(100).to_list(100)
+    return [docs.event_out(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Admin: review queue
+# ---------------------------------------------------------------------------
+
+
+def _waiting(branch: dict, business: dict) -> bool:
+    if docs.branch_status(branch) == "pending_review":
+        return True
+    return docs.branch_status(branch) == "published" and any(
+        service["status"] == "pending_review" for service in docs.services_of(branch, business)
+    )
+
+
+async def _conflicts(db: AsyncIOMotorDatabase, branch: dict, business_id: str) -> list[PlaceConflict]:
+    """Other businesses' branches at the same place: same OSM ref or a few metres away."""
+    pair = docs.lat_lng(docs.point_doc(branch.get("location")))
+    ref = docs.place_ref_doc(branch.get("place_ref"))
+    if pair is None and ref is None:
+        return []
+    rows = await db.business_locations.find({"business_id": {"$ne": business_id}}).to_list(None)
+    found: list[tuple[dict, int, bool]] = []
+    for row in rows:
+        other_ref = docs.place_ref_doc(row.get("place_ref"))
+        same_ref = bool(ref and other_ref and other_ref == ref)
+        other_pair = docs.lat_lng(docs.point_doc(row.get("location")))
+        metres = int(round(_distance_km(pair[0], pair[1], other_pair[0], other_pair[1]) * 1000)) if pair and other_pair else 10**9
+        if same_ref or metres <= _CONFLICT_METERS:
+            found.append((row, metres if metres < 10**9 else 0, same_ref))
+    if not found:
+        return []
+    ids = {ObjectId(row["business_id"]) for row, _, _ in found if ObjectId.is_valid(str(row.get("business_id")))}
+    names = {str(doc["_id"]): docs.text(doc.get("name")) for doc in await db.businesses.find({"_id": {"$in": list(ids)}}).to_list(None)}
+    return [
+        PlaceConflict(
+            business_id=str(row.get("business_id")),
+            business_name=names.get(str(row.get("business_id")), ""),
+            address=docs.text(row.get("address")),
+            distance_m=metres,
+            same_place_ref=same_ref,
+        )
+        for row, metres, same_ref in found
+    ]
+
+
+@router.get("/admin/review", response_model=list[ReviewGroup])
+async def review_queue(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Everything that waits, grouped by business, oldest request first."""
+    _require_admin(current_user)
+    rows = await db.business_locations.find(
+        {"$or": [{"status": "pending_review"}, {"services.status": "pending_review"}]}
+    ).to_list(None)
+    by_business: dict[str, list[dict]] = {}
+    for row in rows:
+        by_business.setdefault(str(row.get("business_id")), []).append(row)
+    ids = [ObjectId(key) for key in by_business if ObjectId.is_valid(key)]
+    businesses = {str(doc["_id"]): doc for doc in await db.businesses.find({"_id": {"$in": ids}}).to_list(None)} if ids else {}
+    members = await db.business_members.find({"business_id": {"$in": list(by_business)}, "role": "owner"}).to_list(None) if by_business else []
+    owners: dict[str, dict] = {}
+    for member in members:
+        owners.setdefault(str(member.get("business_id")), member)
+    groups: list[ReviewGroup] = []
+    for business_id, branches in by_business.items():
+        business = businesses.get(business_id)
+        if not business:
+            continue
+        waiting = [row for row in branches if _waiting(row, business)]
+        if not waiting:
+            continue
+        waiting.sort(key=lambda row: (row.get("submitted_at") or row.get("updated_at") or datetime.min.replace(tzinfo=timezone.utc)))
+        owner = owners.get(business_id) or {}
+        groups.append(
+            ReviewGroup(
+                business=await _full_out(db, business),
+                branches=[ReviewBranch(branch=docs.branch_out(row, business), conflicts=await _conflicts(db, row, business_id)) for row in waiting],
+                first_request=docs.business_status(business) != "published",
+                owner_email=docs.optional_text(owner.get("email")) or docs.optional_text(business.get("owner_email")),
+                owner_since=docs.utc(owner.get("created_at")),
+                waiting_since=docs.utc(waiting[0].get("submitted_at") or waiting[0].get("updated_at")),
+            )
+        )
+    groups.sort(key=lambda group: (group.waiting_since or datetime.max.replace(tzinfo=timezone.utc)))
+    return groups
+
+
+@router.get("/admin/locations", response_model=list[LocationOut])
+async def admin_branches(
+    status: Literal["draft", "pending_review", "published", "rejected"] = "pending_review",
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Branches by status, oldest first."""
+    _require_admin(current_user)
+    rows = await db.business_locations.find({"status": status}).sort("_id", 1).to_list(None)
+    ids = [ObjectId(row["business_id"]) for row in rows if ObjectId.is_valid(str(row.get("business_id")))]
+    businesses = {str(doc["_id"]): doc for doc in await db.businesses.find({"_id": {"$in": ids}}).to_list(None)} if ids else {}
+    return [docs.branch_out(row, businesses.get(str(row.get("business_id")))) for row in rows]
+
+
+async def _approve_branch(
+    db: AsyncIOMotorDatabase,
+    business: dict,
+    row: dict,
+    notes: dict[str, str],
+    admin_email: str,
+) -> dict:
+    now = datetime.now(timezone.utc)
+    was_published = docs.business_status(business) == "published"
+    services = docs.services_of(row, business)
+    for service in services:
+        if service["status"] != "published":
+            service["status"] = "published"
+            service["updated_at"] = now
+    update = {
+        "status": "published",
+        "visible": True if row.get("hidden_by") != "owner" else docs.branch_visible(row),
+        "services": services,
+        "opening_hours": services[0]["opening_hours"] if services else docs.empty_hours(provided=False),
+        "field_errors": {},
+        "admin_notes": notes,
+        "rejection_reason": None,
+        "reviewed_at": now,
+        "reviewed_by": admin_email,
+        "updated_at": now,
+    }
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": update})
+    row.update(update)
+    business_update = {"admin_notes": {**docs.notes(business.get("admin_notes")), **notes}, "reviewed_by": admin_email}
+    await db.businesses.update_one({"_id": business["_id"]}, {"$set": business_update})
+    business.update(business_update)
+    await docs.sync_business(db, business)
+    owner_uid = docs.optional_text(business.get("owner_uid"))
+    if owner_uid:
+        await _upsert_owner_member(db, business, owner_uid, docs.optional_text(business.get("owner_email")), now)
+    kind = "branch_approved" if was_published else "business_published"
+    await docs.record_event(db, business=business, branch=row, kind=kind, audience="owner", actor={"email": admin_email})
+    email, locale = await _owner_contact(db, business)
+    send_owner_update(
+        email, kind="branch_published" if was_published else "published", locale=locale,
+        business_name=docs.text(business.get("name")), address=docs.text(row.get("address")), field_notes=notes,
+    )
+    return row
+
+
+async def _reject_branch(
+    db: AsyncIOMotorDatabase,
+    business: dict,
+    row: dict,
+    field_errors: dict[str, str],
+    admin_email: str,
+) -> dict:
+    now = datetime.now(timezone.utc)
+    status = docs.branch_status(row)
+    services = docs.services_of(row, business)
+    for service in services:
+        if service["status"] == "pending_review":
+            service["status"] = "rejected"
+            service["updated_at"] = now
+    summary = "\n".join(note_lines(field_errors, "en"))
+    update = {
+        "status": "rejected" if status != "published" else "published",
+        "services": services,
+        "field_errors": field_errors,
+        "admin_notes": field_errors,
+        "rejection_reason": summary,
+        "reviewed_at": now,
+        "reviewed_by": admin_email,
+        "updated_at": now,
+    }
+    await db.business_locations.update_one({"_id": row["_id"]}, {"$set": update})
+    row.update(update)
+    await docs.sync_business(db, business)
+    if docs.business_status(business) == "rejected":
+        business_update = {"field_errors": field_errors, "admin_notes": field_errors, "rejection_reason": summary, "reviewed_at": now, "reviewed_by": admin_email}
+        await db.businesses.update_one({"_id": business["_id"]}, {"$set": business_update})
+        business.update(business_update)
+    await docs.record_event(db, business=business, branch=row, kind="branch_rejected", audience="owner", actor={"email": admin_email}, message=summary)
+    email, locale = await _owner_contact(db, business)
+    send_owner_update(
+        email, kind="rejected", locale=locale,
+        business_name=docs.text(business.get("name")), address=docs.text(row.get("address")), field_notes=field_errors,
+    )
+    return row
+
+
+async def _waiting_branch(db: AsyncIOMotorDatabase, location_id: str) -> tuple[dict, dict]:
+    if not ObjectId.is_valid(location_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    row = await db.business_locations.find_one({"_id": ObjectId(location_id)})
+    if not row:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    business = await _business_or_404(db, str(row.get("business_id")))
+    if not _waiting(row, business):
+        raise_api_error(400, ErrorCode.BRANCH_NOT_PENDING)
+    return row, business
+
+
+@router.post("/admin/locations/{location_id}/approve", response_model=LocationOut)
+async def approve_branch(
+    location_id: str,
+    body: BranchApprove | None = None,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Publish a branch. The first approved branch publishes the business and seats its owner."""
+    admin_email = _require_admin(current_user)
+    row, business = await _waiting_branch(db, location_id)
+    _require_complete(row, business)
+    row = await _approve_branch(db, business, row, body.field_notes if body else {}, admin_email)
+    return docs.branch_out(row, business)
+
+
+@router.post("/admin/locations/{location_id}/reject", response_model=LocationOut)
+async def reject_branch(
+    location_id: str,
+    body: BranchReject,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Send a branch back with a note on each field to fix."""
+    admin_email = _require_admin(current_user)
+    notes = body.notes()
+    if not notes:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    row, business = await _waiting_branch(db, location_id)
+    row = await _reject_branch(db, business, row, notes, admin_email)
+    return docs.branch_out(row, business)
 
 
 @router.post("/admin/businesses/{business_id}/approve", response_model=BusinessOut)
@@ -2015,62 +1825,18 @@ async def approve_business(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Publish the listing and make the submitter its Owner.
-
-    Notes are optional. The owner sees them on the published business.
-    """
+    """Approve every waiting branch of a business at once."""
     admin_email = _require_admin(current_user)
-    if not ObjectId.is_valid(business_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    doc = await db.businesses.find_one({"_id": ObjectId(business_id)})
-    if not doc:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    if doc.get("status") != "pending_review":
+    business = await _business_or_404(db, business_id)
+    rows = [row for row in await docs.list_branches(db, business_id) if _waiting(row, business)]
+    if not rows:
         raise_api_error(400, ErrorCode.BUSINESS_NOT_PENDING)
-    now = datetime.now(timezone.utc)
+    for row in rows:
+        _require_complete(row, business)
     notes = body.field_notes if body else {}
-    await db.businesses.update_one(
-        {"_id": doc["_id"]},
-        {
-            "$set": {
-                "status": "published",
-                "rejection_reason": None,
-                "field_errors": {},
-                "admin_notes": notes,
-                "reviewed_at": now,
-                "reviewed_by": admin_email,
-                "updated_at": now,
-            }
-        },
-    )
-    await db.business_members.update_one(
-        {"business_id": str(doc["_id"]), "user_id": doc["owner_uid"]},
-        {
-            "$set": {
-                "business_id": str(doc["_id"]),
-                "user_id": doc["owner_uid"],
-                "email": doc.get("owner_email"),
-                "role": "owner",
-                "updated_at": now,
-            },
-            "$setOnInsert": {"created_at": now},
-        },
-        upsert=True,
-    )
-    doc["status"] = "published"
-    doc["rejection_reason"] = None
-    doc["field_errors"] = {}
-    doc["admin_notes"] = notes
-    doc["reviewed_at"] = now
-    doc["updated_at"] = now
-    _email_owner(
-        doc.get("owner_email"),
-        business_name=doc.get("name") or "",
-        subject=f"Ragly: {doc.get('name') or 'Your business'} is published",
-        intro=f"{doc.get('name') or 'Your business'} is published. Pet owners can find it in the app.",
-        lines=[f"{key}: {message}" for key, message in notes.items()] or None,
-    )
-    return _to_out(doc)
+    for row in rows:
+        await _approve_branch(db, business, row, notes, admin_email)
+    return await _full_out(db, business)
 
 
 @router.post("/admin/businesses/{business_id}/reject", response_model=BusinessOut)
@@ -2080,42 +1846,339 @@ async def reject_business(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Keep the listing off the app and store a note on each field the owner must fix."""
+    """Send every waiting branch of a business back with the same notes."""
     admin_email = _require_admin(current_user)
-    if not ObjectId.is_valid(business_id):
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    doc = await db.businesses.find_one({"_id": ObjectId(business_id)})
-    if not doc:
-        raise_api_error(404, ErrorCode.NOT_FOUND)
-    if doc.get("status") != "pending_review":
+    business = await _business_or_404(db, business_id)
+    rows = [row for row in await docs.list_branches(db, business_id) if _waiting(row, business)]
+    if not rows:
         raise_api_error(400, ErrorCode.BUSINESS_NOT_PENDING)
+    for row in rows:
+        await _reject_branch(db, business, row, body.field_errors, admin_email)
+    return await _full_out(db, business)
+
+
+# ---------------------------------------------------------------------------
+# Admin: create, list, invite
+# ---------------------------------------------------------------------------
+
+
+@router.post("/admin/businesses", response_model=BusinessOut, status_code=201)
+async def admin_create_business(
+    body: AdminCreate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """The admin one-form: a published business with its first branch, and an owner invitation."""
+    admin_email = _require_admin(current_user)
+    await _ensure_unique_name(db, body.business.name)
     now = datetime.now(timezone.utc)
-    summary = "\n".join(f"{key}: {message}" for key, message in body.field_errors.items())
-    await db.businesses.update_one(
-        {"_id": doc["_id"]},
-        {
-            "$set": {
-                "status": "rejected",
-                "rejection_reason": summary,
-                "field_errors": body.field_errors,
-                "admin_notes": body.field_errors,
-                "reviewed_at": now,
-                "reviewed_by": admin_email,
-                "updated_at": now,
+    business = docs.build_business(
+        body.business, status="published", source="admin", now=now,
+        owner_uid=None, owner_email=None, locale=body.business.locale or "en",
+    )
+    business["_id"] = ObjectId()
+    business["submitted_at"] = now
+    business["reviewed_at"] = now
+    business["reviewed_by"] = admin_email
+    branch = _build_branch_or_400(business, body.branch, status="published", source="admin", now=now, is_main=True)
+    _require_complete(branch, business)
+    branch["submitted_at"] = now
+    branch["reviewed_at"] = now
+    branch["reviewed_by"] = admin_email
+    mirrored = docs.mirror_fields(business, [branch])
+    business.update(mirrored)
+    try:
+        await db.businesses.insert_one(business)
+    except DuplicateKeyError:
+        raise_api_error(409, ErrorCode.BUSINESS_NAME_TAKEN)
+    result = await db.business_locations.insert_one(branch)
+    branch["_id"] = result.inserted_id
+    await docs.record_event(db, business=business, branch=branch, kind="business_published", audience="owner", actor={"email": admin_email})
+    out = await _full_out(db, business)
+    if body.owner_email:
+        invite = await _create_invitation(db, business, body.owner_email, "owner", admin_email)
+        out.invitations = [_invite_out(invite, business["name"])]
+    return out
+
+
+def _page_match(status: str | None, category: str | None, q: str | None, ownership: str, owner_oids: list[ObjectId]) -> dict:
+    clauses: list[dict] = []
+    if status == "reviewed":
+        clauses.append({"status": {"$in": ["published", "rejected"]}})
+    elif status:
+        clauses.append({"status": status})
+    if category:
+        clauses.append({"$or": [{"categories": category}, {"category": category}]})
+    text = (q or "").strip()
+    if text:
+        pattern = re.escape(text)
+        clauses.append(
+            {
+                "$or": [
+                    {"name": {"$regex": pattern, "$options": "i"}},
+                    {"city": {"$regex": pattern, "$options": "i"}},
+                    {"address": {"$regex": pattern, "$options": "i"}},
+                ]
             }
-        },
+        )
+    if ownership == "owned":
+        clauses.append({"$or": [{"owner_uid": {"$type": "string"}}, {"_id": {"$in": owner_oids}}]})
+    elif ownership == "unowned":
+        clauses.append({"owner_uid": {"$not": {"$type": "string"}}})
+        clauses.append({"_id": {"$nin": owner_oids}})
+    if not clauses:
+        return {}
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
+
+
+@router.get("/admin/businesses/summary", response_model=BusinessCounts)
+async def business_summary(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Counts for the admin dashboard. Pending counts businesses with something waiting."""
+    _require_admin(current_user)
+    counts = {"pending_review": 0, "published": 0, "rejected": 0}
+    rows = await db.businesses.aggregate([{"$group": {"_id": "$status", "n": {"$sum": 1}}}]).to_list(None)
+    for row in rows:
+        if row.get("_id") in counts:
+            counts[row["_id"]] = row["n"]
+    waiting_rows = await db.business_locations.find(
+        {"$or": [{"status": "pending_review"}, {"services.status": "pending_review"}]}, {"business_id": 1}
+    ).to_list(None)
+    waiting = {str(row.get("business_id")) for row in waiting_rows}
+    deleted = await db.business_deletions.count_documents({})
+    return BusinessCounts(
+        pending=max(counts["pending_review"], len(waiting)),
+        published=counts["published"],
+        rejected=counts["rejected"],
+        deleted=deleted,
     )
-    doc["status"] = "rejected"
-    doc["rejection_reason"] = summary
-    doc["field_errors"] = body.field_errors
-    doc["admin_notes"] = body.field_errors
-    doc["reviewed_at"] = now
-    doc["updated_at"] = now
-    _email_owner(
-        doc.get("owner_email"),
-        business_name=doc.get("name") or "",
-        subject=f"Ragly: {doc.get('name') or 'Your business'} needs changes",
-        intro=f"{doc.get('name') or 'Your business'} was not published. Fix the fields below and send it again.",
-        lines=[f"{key}: {message}" for key, message in body.field_errors.items()],
+
+
+@router.get("/admin/businesses/page", response_model=BusinessPage)
+async def page_businesses(
+    limit: int = Query(default=20, ge=1, le=50),
+    skip: int = Query(default=0, ge=0),
+    status: str | None = None,
+    category: str | None = None,
+    q: str | None = None,
+    ownership: Literal["all", "owned", "unowned"] = "all",
+    sort: Literal["category", "name", "city", "recent"] = "category",
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """One page of businesses. The next page is requested as the list scrolls."""
+    _require_admin(current_user)
+    allowed_status = {"draft", "pending_review", "published", "rejected", "suspended", "reviewed"}
+    if status and status not in allowed_status:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    if category and category not in CATEGORIES:
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    owner_oids: list[ObjectId] = []
+    if ownership != "all":
+        rows = await db.business_members.find({"role": "owner"}, {"business_id": 1}).to_list(None)
+        for row in rows:
+            business_id = str(row.get("business_id") or "")
+            if ObjectId.is_valid(business_id):
+                owner_oids.append(ObjectId(business_id))
+    match = _page_match(status, category, q, ownership, owner_oids)
+    if sort == "name":
+        sort_spec = [("name", 1), ("_id", 1)]
+    elif sort == "city":
+        sort_spec = [("city", 1), ("name", 1), ("_id", 1)]
+    elif sort == "recent":
+        sort_spec = [("updated_at", -1), ("_id", -1)]
+    else:
+        sort_spec = None
+    if sort_spec is None:
+        pipeline = [
+            *([{"$match": match}] if match else []),
+            {
+                "$addFields": {
+                    "_rank": {
+                        "$switch": {
+                            "branches": [
+                                {"case": {"$eq": ["$category", name]}, "then": index}
+                                for index, name in enumerate(CATEGORIES)
+                            ],
+                            "default": 9,
+                        }
+                    }
+                }
+            },
+            {"$sort": {"_rank": 1, "name": 1, "_id": 1}},
+            {"$skip": skip},
+            {"$limit": limit + 1},
+        ]
+        rows = await db.businesses.aggregate(pipeline).to_list(None)
+    else:
+        rows = await db.businesses.find(match).sort(sort_spec).skip(skip).limit(limit + 1).to_list(None)
+    has_more = len(rows) > limit
+    return BusinessPage(items=await _decorate(db, rows[:limit]), has_more=has_more)
+
+
+@router.get("/admin/businesses", response_model=list[BusinessOut])
+async def list_businesses_for_review(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Every business, pending first. Admins only."""
+    _require_admin(current_user)
+    rows = await db.businesses.find({}).sort("submitted_at", -1).to_list(None)
+    order = {"pending_review": 0, "rejected": 1, "draft": 2, "published": 3, "suspended": 4}
+    rows.sort(key=lambda doc: (order.get(doc.get("status"), 9),))
+    return await _decorate(db, rows)
+
+
+@router.get("/admin/businesses/{business_id}", response_model=BusinessOut)
+async def admin_get_business(
+    business_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """One business with its branches, for the admin branch editor."""
+    _require_admin(current_user)
+    business = await _business_or_404(db, business_id)
+    return await _full_out(db, business)
+
+
+@router.post("/admin/businesses/{business_id}/invitations", response_model=InvitationOut, status_code=201)
+async def admin_invite_owner(
+    business_id: str,
+    body: OwnerInvite,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Email someone a request to become the owner. Membership waits for their approval."""
+    admin_email = _require_admin(current_user)
+    business = await _business_or_404(db, business_id)
+    invite = await _create_invitation(db, business, body.email, "owner", admin_email)
+    return _invite_out(invite, business.get("name") or "")
+
+
+# ---------------------------------------------------------------------------
+# Team invitations
+# ---------------------------------------------------------------------------
+
+
+@router.post("/businesses/{business_id}/invitations", response_model=InvitationOut, status_code=201)
+async def owner_invite_member(
+    business_id: str,
+    body: TeamInvite,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Invite an owner for every branch, or a store manager, lead, or staff for one branch."""
+    business = await _business_or_404(db, business_id)
+    uid = current_user["uid"]
+    is_owner = await _brand_owner(db, business, current_user)
+    location_id = (body.location_id or "").strip() or None
+    reports_to = (body.reports_to or "").strip() or None
+    if body.role == "owner":
+        if not is_owner:
+            raise_api_error(403, ErrorCode.UNAUTHORIZED)
+        location_id = None
+        reports_to = None
+    else:
+        if not location_id:
+            rows = await docs.ensure_branches(db, business)
+            location_id = str(rows[0]["_id"]) if rows else None
+        if not location_id or not ObjectId.is_valid(location_id):
+            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+        branch = await db.business_locations.find_one({"_id": ObjectId(location_id), "business_id": str(business["_id"])})
+        if not branch:
+            raise_api_error(404, ErrorCode.NOT_FOUND)
+        if docs.branch_status(branch) != "published":
+            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+        if not is_owner:
+            mine = await db.business_members.find(
+                {"business_id": str(business["_id"]), "user_id": uid, "location_id": location_id}
+            ).to_list(None)
+            roles = {row.get("role") for row in mine}
+            if body.role == "branch_owner" or not roles.intersection({"branch_owner", "lead"}):
+                raise_api_error(403, ErrorCode.UNAUTHORIZED)
+            if "lead" in roles and "branch_owner" not in roles:
+                reports_to = reports_to or uid
+    invite = await _create_invitation(
+        db, business, body.email, body.role,
+        (current_user.get("email") or "").strip().lower(), location_id, reports_to,
     )
-    return _to_out(doc)
+    return _invite_out(invite, business.get("name") or "")
+
+
+@router.post("/businesses/invitations/{invitation_id}/approve", response_model=InvitationOut)
+async def approve_invitation(
+    invitation_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """The invited person accepts and becomes a business_members row."""
+    return await _respond_invitation(invitation_id, current_user, db, accepted=True)
+
+
+@router.post("/businesses/invitations/{invitation_id}/decline", response_model=InvitationOut)
+async def decline_invitation(
+    invitation_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """The invited person declines. No membership is created."""
+    return await _respond_invitation(invitation_id, current_user, db, accepted=False)
+
+
+async def _respond_invitation(invitation_id: str, current_user: dict, db: AsyncIOMotorDatabase, *, accepted: bool) -> InvitationOut:
+    if not ObjectId.is_valid(invitation_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    invite = await db.business_invitations.find_one({"_id": ObjectId(invitation_id)})
+    if not invite:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    email = (current_user.get("email") or "").strip().lower()
+    if invite.get("email") != email:
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+    if invite.get("status") != "pending":
+        raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
+    business = await _business_or_404(db, str(invite.get("business_id")))
+    now = datetime.now(timezone.utc)
+    status = "approved" if accepted else "declined"
+    await db.business_invitations.update_one(
+        {"_id": invite["_id"]}, {"$set": {"status": status, "updated_at": now, "responded_at": now}}
+    )
+    invite["status"] = status
+    if accepted:
+        uid = current_user["uid"]
+        role = invite.get("role") if invite.get("role") in _ROLES else "worker"
+        if role == "owner":
+            await _upsert_owner_member(db, business, uid, email, now)
+            if not business.get("owner_uid"):
+                person = await db.users.find_one({"firebase_uid": uid}) or {}
+                locale = docs.text(person.get("locale")).lower()[:2]
+                update = {"owner_uid": uid, "owner_email": email, "updated_at": now}
+                if locale in {"en", "ro", "ru", "he"} and not docs.text(business.get("locale")):
+                    update["locale"] = locale
+                await db.businesses.update_one({"_id": business["_id"]}, {"$set": update})
+        else:
+            location_id = docs.optional_text(invite.get("location_id"))
+            await db.business_members.update_one(
+                {"business_id": str(business["_id"]), "user_id": uid, "location_id": location_id},
+                {
+                    "$set": {
+                        "business_id": str(business["_id"]),
+                        "user_id": uid,
+                        "email": email,
+                        "role": role,
+                        "location_id": location_id,
+                        "reports_to": docs.optional_text(invite.get("reports_to")),
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+        await docs.record_event(
+            db, business=business, kind="owner_joined" if role == "owner" else "member_joined",
+            audience="admins", actor=_actor(current_user), message=email,
+        )
+    return _invite_out(invite, business.get("name") or "")

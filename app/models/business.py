@@ -1,4 +1,10 @@
-"""Business listing submitted by an owner and reviewed by a Ragly admin."""
+"""Business, branch, and service documents as the API sends and receives them.
+
+A business is the brand (name, logo, about, general contacts, owner).
+A branch (`business_locations`) is one address with its own map point, contacts,
+status, and visibility. A service is one category offered at a branch, with its
+own opening hours, stored inside the branch document.
+"""
 
 from datetime import datetime
 from typing import Literal, Optional
@@ -14,12 +20,18 @@ BusinessCategory = Literal[
     "pet_friendly",
     "pet_store",
 ]
+CATEGORIES: tuple[str, ...] = ("veterinarian", "groomer", "pharmacy", "pet_friendly", "pet_store")
+
 BusinessStatus = Literal[
+    "draft",
     "pending_review",
     "published",
     "rejected",
     "suspended",
 ]
+BranchStatus = Literal["draft", "pending_review", "published", "rejected"]
+Locale = Literal["en", "ro", "ru", "he"]
+Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
 class TimeSlot(BaseModel):
@@ -42,8 +54,20 @@ class GeoLocation(BaseModel):
         return [float(longitude), float(latitude)]
 
 
+class SpecialDate(BaseModel):
+    """One calendar day that replaces the weekly hours: closed, or other hours."""
+
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    closed: bool = False
+    slots: list[TimeSlot] = Field(default_factory=list)
+
+
 class OpeningHours(BaseModel):
-    """`provided` is false when the business has no hours to publish."""
+    """`provided` is false when there are no fixed hours to publish.
+
+    Each day is a list of slots, so a break is two slots. A slot whose close is
+    earlier than its open ends the next day (20:00–02:00).
+    """
 
     provided: bool = True
     always_open: bool = False
@@ -54,22 +78,34 @@ class OpeningHours(BaseModel):
     fri: list[TimeSlot] = Field(default_factory=list)
     sat: list[TimeSlot] = Field(default_factory=list)
     sun: list[TimeSlot] = Field(default_factory=list)
+    special_dates: list[SpecialDate] = Field(default_factory=list)
 
 
-class BusinessSubmit(BaseModel):
+def _owner_email(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    if "@" not in text or "." not in text.split("@")[-1]:
+        raise ValueError("owner_email")
+    return text
+
+
+class BusinessDetails(BaseModel):
+    """The business itself: what onboarding collects and what Edit business changes.
+
+    Category, address, hours, and the map point live on branches, not here.
+    The logo is uploaded separately and stored in `photo`.
+    """
+
     name: str = Field(min_length=1, max_length=200)
     phone: list[str] = Field(min_length=1)
     email: Optional[str] = None
-    description: Optional[str] = None
-    category: BusinessCategory
-    city: str = Field(min_length=1, max_length=120)
-    address: str = Field(min_length=1, max_length=300)
-    timezone: str = Field(min_length=1, max_length=64)
-    opening_hours: OpeningHours
+    description: Optional[str] = Field(default=None, max_length=2000)
     website: Optional[str] = None
-    location: GeoLocation
-    photo: Optional[str] = None
     instagram: Optional[str] = None
+    locale: Optional[Locale] = None
 
     @field_validator("phone")
     @classmethod
@@ -92,33 +128,138 @@ class BusinessSubmit(BaseModel):
         return clean_instagram(value)
 
 
-_REVIEW_FIELDS = frozenset(
+class ServiceWrite(BaseModel):
+    """One category at a branch with its own hours. `id` keeps an existing service's identity."""
+
+    id: Optional[str] = None
+    category: BusinessCategory
+    opening_hours: OpeningHours = Field(default_factory=OpeningHours)
+    phone: list[str] = Field(default_factory=list)
+
+    @field_validator("phone")
+    @classmethod
+    def phone_clean(cls, value: list[str]) -> list[str]:
+        return clean_phone_list(value, required=False)
+
+
+class PlaceRef(BaseModel):
+    provider: Literal["osm", "google"]
+    id: str = Field(min_length=1, max_length=200)
+
+
+class BranchWrite(BaseModel):
+    """One branch as the form sends it. Everything but the address may be empty on a draft."""
+
+    address: str = Field(default="", max_length=300)
+    city: str = Field(default="", max_length=120)
+    location: Optional[GeoLocation] = None
+    place_ref: Optional[PlaceRef] = None
+    services: list[ServiceWrite] = Field(default_factory=list)
+    phone: Optional[list[str]] = None
+    website: Optional[str] = None
+    instagram: Optional[str] = None
+    photo: Optional[str] = None
+    timezone: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("phone")
+    @classmethod
+    def phone_clean(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return None
+        return clean_phone_list(value, required=False)
+
+    @field_validator("website")
+    @classmethod
+    def website_optional(cls, value: Optional[str]) -> Optional[str]:
+        return clean_website(value)
+
+    @field_validator("instagram")
+    @classmethod
+    def instagram_optional(cls, value: Optional[str]) -> Optional[str]:
+        return clean_instagram(value)
+
+
+# The old name, still imported by older code paths.
+LocationWrite = BranchWrite
+
+
+class ServiceOut(BaseModel):
+    id: str
+    category: BusinessCategory
+    opening_hours: OpeningHours
+    phone: list[str] = Field(default_factory=list)
+    status: BranchStatus = "published"
+    visible: bool = True
+
+
+class LocationOut(BaseModel):
+    id: str
+    business_id: str
+    is_main: bool = False
+    address: str = ""
+    city: str = ""
+    timezone: str = "Europe/Chisinau"
+    location: Optional[GeoLocation] = None
+    place_ref: Optional[PlaceRef] = None
+    services: list[ServiceOut] = Field(default_factory=list)
+    # Branch-level hours: the first service's hours, kept for older clients.
+    opening_hours: OpeningHours = Field(default_factory=OpeningHours)
+    phone: list[str] = Field(default_factory=list)
+    website: Optional[str] = None
+    instagram: Optional[str] = None
+    photo: Optional[str] = None
+    status: BranchStatus = "published"
+    visible: bool = True
+    hidden_reason: Optional[str] = None
+    hidden_by: Optional[Literal["owner", "admin"]] = None
+    rejection_reason: Optional[str] = None
+    field_errors: dict[str, str] = Field(default_factory=dict)
+    admin_notes: dict[str, str] = Field(default_factory=dict)
+    submitted_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+_BUSINESS_REVIEW_FIELDS = frozenset(
     {
         "name",
         "phone",
         "email",
         "description",
-        "category",
-        "city",
-        "address",
-        "timezone",
-        "hours",
         "website",
-        "location",
         "photo",
         "instagram",
+        "general",
+    }
+)
+_BRANCH_REVIEW_FIELDS = frozenset(
+    {
+        "address",
+        "city",
+        "location",
+        "services",
+        "hours",
+        "phone",
+        "website",
+        "instagram",
+        "photo",
+        "general",
     }
 )
 
 
-def _clean_notes(value: dict[str, str]) -> dict[str, str]:
+def _clean_notes(value: dict[str, str], allowed: frozenset[str]) -> dict[str, str]:
     cleaned: dict[str, str] = {}
     for key, message in value.items():
-        if key not in _REVIEW_FIELDS:
+        if not isinstance(key, str) or not isinstance(message, str):
+            continue
+        base = key.split(":", 1)[0]
+        if base not in allowed and base != "service":
             continue
         text = message.strip()
         if text:
-            cleaned[key] = text[:500]
+            cleaned[key[:80]] = text[:500]
     return cleaned
 
 
@@ -128,80 +269,67 @@ class BusinessReject(BaseModel):
     @field_validator("field_errors")
     @classmethod
     def notes_present(cls, value: dict[str, str]) -> dict[str, str]:
-        cleaned = _clean_notes(value)
+        cleaned = _clean_notes(value, _BUSINESS_REVIEW_FIELDS | _BRANCH_REVIEW_FIELDS)
         if not cleaned:
             raise ValueError("field_errors")
         return cleaned
 
 
 class AdminApprove(BaseModel):
-    """Optional notes the owner still sees after the business is published."""
+    """Optional notes the owner still sees after the request is accepted."""
 
     field_notes: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("field_notes")
     @classmethod
     def notes_clean(cls, value: dict[str, str]) -> dict[str, str]:
-        return _clean_notes(value)
+        return _clean_notes(value, _BUSINESS_REVIEW_FIELDS | _BRANCH_REVIEW_FIELDS)
 
 
-class AdminPublish(BusinessSubmit):
-    """A listing an admin publishes. An owner email is optional."""
+class BranchReject(BaseModel):
+    """Send a branch back. Notes per field; `reason` alone becomes a general note."""
 
+    field_errors: dict[str, str] = Field(default_factory=dict)
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+    def notes(self) -> dict[str, str]:
+        cleaned = _clean_notes(self.field_errors, _BRANCH_REVIEW_FIELDS)
+        text = (self.reason or "").strip()
+        if text and "general" not in cleaned:
+            cleaned["general"] = text[:500]
+        return cleaned
+
+
+class BranchVisibility(BaseModel):
+    """Pause or resume a live branch in the app."""
+
+    visible: bool
+    reason: Optional[str] = Field(default=None, max_length=300)
+
+
+class BranchApprove(BaseModel):
+    field_notes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("field_notes")
+    @classmethod
+    def notes_clean(cls, value: dict[str, str]) -> dict[str, str]:
+        return _clean_notes(value, _BRANCH_REVIEW_FIELDS)
+
+
+class AdminCreate(BaseModel):
+    """The admin one-form: the business, its first branch, and an optional owner."""
+
+    business: BusinessDetails
+    branch: BranchWrite
     owner_email: Optional[str] = None
 
     @field_validator("owner_email")
     @classmethod
     def owner_email_optional(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        text = value.strip().lower()
-        if not text:
-            return None
-        if "@" not in text or "." not in text.split("@")[-1]:
-            raise ValueError("owner_email")
-        return text
+        return _owner_email(value)
 
 
 MemberRole = Literal["owner", "branch_owner", "lead", "worker"]
-
-
-class LocationWrite(BaseModel):
-    """One branch. Phone is only set when this branch has its own number."""
-
-    address: str = Field(min_length=1, max_length=300)
-    city: str = Field(min_length=1, max_length=120)
-    timezone: str = Field(min_length=1, max_length=64)
-    opening_hours: OpeningHours
-    location: GeoLocation
-    phone: list[str] = Field(default_factory=list)
-
-    @field_validator("phone")
-    @classmethod
-    def phone_clean(cls, value: list[str]) -> list[str]:
-        return clean_phone_list(value, required=False)
-
-
-class LocationOut(LocationWrite):
-    id: str
-    business_id: str
-    status: Literal["pending_review", "published", "rejected"] = "published"
-    rejection_reason: Optional[str] = None
-    reviewed_at: Optional[datetime] = None
-
-
-class StoreReview(BaseModel):
-    """A branch waiting in the admin panel, with the business it belongs to."""
-
-    id: str
-    business_id: str
-    business_name: str
-    address: str
-    city: str
-    phone: list[str] = Field(default_factory=list)
-    opening_hours: OpeningHours
-    status: Literal["pending_review", "published", "rejected"]
-    rejection_reason: Optional[str] = None
 
 
 class StoreReject(BaseModel):
@@ -216,11 +344,22 @@ class StoreReject(BaseModel):
         return text
 
 
+class PlaceService(BaseModel):
+    """One service of a branch on the public business screen."""
+
+    id: str
+    category: BusinessCategory
+    opening_hours: OpeningHours
+    phone: list[str] = Field(default_factory=list)
+
+
 class PlaceLocation(BaseModel):
     """A branch on the public business screen.
 
     `phone` is only the branch number. `call_phone` is the number to dial:
     the branch number, or the business number when the branch has none.
+    `opening_hours` is the first service's hours, for app versions that show
+    one schedule per branch. `services` carries every service.
     """
 
     id: str
@@ -232,6 +371,9 @@ class PlaceLocation(BaseModel):
     shared_phone: bool = False
     location: Optional[GeoLocation] = None
     distance_km: Optional[float] = None
+    categories: list[BusinessCategory] = Field(default_factory=list)
+    services: list[PlaceService] = Field(default_factory=list)
+    photo: Optional[str] = None
 
 
 class InvitationOut(BaseModel):
@@ -250,12 +392,14 @@ class BusinessOut(BaseModel):
     phone: list[str]
     email: Optional[str] = None
     description: Optional[str] = None
-    category: BusinessCategory
-    city: str
+    # Mirrored from the main branch's first service, for older clients and filters.
+    category: Optional[BusinessCategory] = None
+    categories: list[BusinessCategory] = Field(default_factory=list)
+    city: str = ""
     status: BusinessStatus
-    address: str
-    timezone: str
-    opening_hours: OpeningHours
+    address: str = ""
+    timezone: str = "Europe/Chisinau"
+    opening_hours: OpeningHours = Field(default_factory=OpeningHours)
     website: Optional[str] = None
     location: Optional[GeoLocation] = None
     photo: Optional[str] = None
@@ -264,6 +408,7 @@ class BusinessOut(BaseModel):
     owner_email: Optional[str] = None
     owned: bool = False
     instagram: Optional[str] = None
+    locale: Locale = "en"
     rejection_reason: Optional[str] = None
     field_errors: dict[str, str] = Field(default_factory=dict)
     admin_notes: dict[str, str] = Field(default_factory=dict)
@@ -302,12 +447,60 @@ class BusinessPage(BaseModel):
     has_more: bool = False
 
 
+class NameCheck(BaseModel):
+    available: bool
+    name_key: str
+    """True when the name is taken and that listing has no owner yet. The
+    website then offers Contact us instead of a plain 'name taken' error."""
+    claimable: bool = False
+
+
+class EventOut(BaseModel):
+    id: str
+    business_id: str
+    business_name: str = ""
+    location_id: Optional[str] = None
+    address: Optional[str] = None
+    kind: str
+    actor_email: Optional[str] = None
+    audience: Literal["owner", "admins"]
+    message: Optional[str] = None
+    created_at: datetime
+
+
+class PlaceConflict(BaseModel):
+    """Another business already at this place, shown to the admin."""
+
+    business_id: str
+    business_name: str
+    address: str
+    distance_m: int
+    same_place_ref: bool = False
+
+
+class ReviewBranch(BaseModel):
+    branch: LocationOut
+    conflicts: list[PlaceConflict] = Field(default_factory=list)
+
+
+class ReviewGroup(BaseModel):
+    """One business in the admin queue with every branch of it that waits."""
+
+    business: BusinessOut
+    branches: list[ReviewBranch]
+    first_request: bool
+    owner_email: Optional[str] = None
+    owner_since: Optional[datetime] = None
+    waiting_since: Optional[datetime] = None
+
+
 class BusinessPlace(BaseModel):
-    """A published listing shown to pet owners, closest first when a location is sent."""
+    """One live branch on Near you. `id` is the business, `location_id` is the branch."""
 
     id: str
     name: str
     category: BusinessCategory
+    categories: list[BusinessCategory] = Field(default_factory=list)
     city: str
     image: Optional[str] = None
     distance_km: Optional[float] = None
@@ -316,10 +509,11 @@ class BusinessPlace(BaseModel):
     open_24_7: bool = False
     closes_at: Optional[str] = None
     opens_at: Optional[str] = None
-    next_open_day: Optional[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = None
+    next_open_day: Optional[Weekday] = None
     opens_tomorrow: bool = False
     address: str = ""
     location_count: int = 1
+    location_id: Optional[str] = None
 
 
 class BusinessPlacePage(BaseModel):
@@ -404,3 +598,5 @@ class BusinessSession(BaseModel):
     businesses: list[BusinessMembership] = Field(default_factory=list)
     role: Optional[MemberRole] = None
     invitations: list[InvitationOut] = Field(default_factory=list)
+    notices: list[EventOut] = Field(default_factory=list)
+    locale: Locale = "en"
