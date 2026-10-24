@@ -63,6 +63,7 @@ from app.models.business import (
     ListingVisibility,
     LocationOut,
     NameCheck,
+    NoticeSeen,
     OwnerInvite,
     PhotoRemove,
     PlaceConflict,
@@ -415,17 +416,21 @@ async def _notices(db: AsyncIOMotorDatabase, uid: str, business_ids: list[str]) 
     if not business_ids:
         return []
     read = await db.business_notice_reads.find_one({"user_id": uid}) or {}
-    seen_at = read.get("seen_at")
-    query: dict = {"business_id": {"$in": business_ids}, "audience": "owner"}
-    if isinstance(seen_at, datetime):
-        query["created_at"] = {"$gt": seen_at}
+    seen_at = docs.utc(read.get("seen_at"))
+    seen_ids = {str(item) for item in (read.get("seen_ids") or []) if item}
     rows = (
-        await db.business_events.find(query)
+        await db.business_events.find({"business_id": {"$in": business_ids}, "audience": "owner"})
         .sort([("created_at", -1), ("_id", -1)])
         .limit(_NOTICE_LIMIT)
         .to_list(_NOTICE_LIMIT)
     )
-    return [docs.event_out(row) for row in rows]
+    out: list[EventOut] = []
+    for row in rows:
+        created = docs.utc(row.get("created_at"))
+        event_id = str(row.get("_id") or "")
+        unread = event_id not in seen_ids and (seen_at is None or (created is not None and created > seen_at))
+        out.append(docs.event_out(row, unread=unread))
+    return out
 
 
 @router.get("/businesses/mine", response_model=BusinessSession)
@@ -494,11 +499,20 @@ async def my_business(
 
 @router.post("/businesses/seen", status_code=204)
 async def mark_business_notices_seen(
+    body: NoticeSeen | None = None,
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """The owner opened the bell. Notices before now are read."""
+    """Mark one notice read, or the whole list when no event is sent."""
     now = datetime.now(timezone.utc)
+    event_id = (body.event_id if body else None) or None
+    if event_id:
+        await db.business_notice_reads.update_one(
+            {"user_id": current_user["uid"]},
+            {"$set": {"user_id": current_user["uid"]}, "$addToSet": {"seen_ids": event_id}},
+            upsert=True,
+        )
+        return
     await db.business_notice_reads.update_one(
         {"user_id": current_user["uid"]},
         {"$set": {"user_id": current_user["uid"], "seen_at": now}},

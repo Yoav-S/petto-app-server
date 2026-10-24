@@ -250,7 +250,9 @@ def test_first_branch_from_draft_to_published(client, mock_db):
 
         seen = client.post("/api/v1/businesses/seen", headers=HEADERS_A)
         assert seen.status_code == 204
-        assert client.get("/api/v1/businesses/mine", headers=HEADERS_A).json()["notices"] == []
+        after = client.get("/api/v1/businesses/mine", headers=HEADERS_A).json()["notices"]
+        assert [n["kind"] for n in after] == ["business_published"]
+        assert after[0]["unread"] is False
 
         assert client.get("/api/v1/admin/review", headers=HEADERS_B).json() == []
 

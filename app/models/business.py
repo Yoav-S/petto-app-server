@@ -467,6 +467,12 @@ class NameCheck(BaseModel):
     claimable: bool = False
 
 
+class NoticeSeen(BaseModel):
+    """Mark one notice read, or omit `event_id` to mark the whole list."""
+
+    event_id: Optional[str] = None
+
+
 class EventOut(BaseModel):
     id: str
     business_id: str
@@ -478,6 +484,7 @@ class EventOut(BaseModel):
     audience: Literal["owner", "admins"]
     message: Optional[str] = None
     created_at: datetime
+    unread: bool = False
 
 
 class PlaceConflict(BaseModel):

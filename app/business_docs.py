@@ -1102,7 +1102,7 @@ async def record_event(
     )
 
 
-def event_out(doc: dict) -> EventOut:
+def event_out(doc: dict, unread: bool = False) -> EventOut:
     data = doc_to_dict(doc)
     return EventOut(
         id=data["id"],
@@ -1115,4 +1115,5 @@ def event_out(doc: dict) -> EventOut:
         audience=doc.get("audience") if doc.get("audience") in {"owner", "admins"} else "owner",
         message=optional_text(doc.get("message")),
         created_at=utc(doc.get("created_at")) or datetime.now(timezone.utc),
+        unread=unread,
     )
