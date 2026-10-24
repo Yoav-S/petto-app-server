@@ -48,6 +48,7 @@ from app.models.business import (
     BusinessOut,
     EventOut,
     LocationOut,
+    OnboardingStep,
     OpeningHours,
     PlaceLocation,
     PlaceService,
@@ -61,6 +62,7 @@ DEFAULT_TIMEZONE = "Europe/Chisinau"
 BRANCH_STATUSES = frozenset({"draft", "pending_review", "published", "rejected"})
 BUSINESS_STATUSES = frozenset({"draft", "pending_review", "published", "rejected", "suspended"})
 MAX_PHOTOS = 6
+ONBOARDING_STEPS = ("description", "logo", "phones", "email", "website", "instagram", "done")
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -171,6 +173,28 @@ def valid_timezone(name: object) -> str | None:
     except (ZoneInfoNotFoundError, ValueError):
         return None
     return value
+
+
+def onboarding_step_of(doc: dict) -> OnboardingStep:
+    """Resume the owner wizard. Legacy owner drafts that never finished come back at description."""
+    raw = optional_text(doc.get("onboarding_step"))
+    if raw in ONBOARDING_STEPS:
+        return raw  # type: ignore[return-value]
+    if text(doc.get("source")) == "owner" and business_status(doc) == "draft":
+        return "description"
+    return "done"
+
+
+def _onboarding_step_for(details: BusinessDetails, previous: dict, source: str) -> OnboardingStep:
+    if source == "admin" or text(previous.get("source")) == "admin":
+        return "done"
+    requested = details.onboarding_step
+    if requested in ONBOARDING_STEPS:
+        return requested
+    stored = optional_text(previous.get("onboarding_step"))
+    if stored in ONBOARDING_STEPS:
+        return stored  # type: ignore[return-value]
+    return "description" if not previous else onboarding_step_of(previous)
 
 
 def clean_photo(value: object) -> str | None:
@@ -659,6 +683,9 @@ def branch_missing(branch: dict, business: dict | None = None) -> list[str]:
         missing.append("services")
     elif not all(hours_complete(service["opening_hours"]) for service in services):
         missing.append("hours")
+    # A listing card needs a picture: the business logo, or this branch's photo.
+    if text((business or {}).get("source")) != "admin" and not logo(business or {}) and not clean_photo(branch.get("photo")):
+        missing.append("photo")
     return missing
 
 
@@ -783,6 +810,7 @@ def build_business(
         "reviewed_by": optional_text(previous.get("reviewed_by")),
         "created_at": previous.get("created_at") or now,
         "updated_at": now,
+        "onboarding_step": _onboarding_step_for(details, previous, source),
         # Mirrored from the main branch. Empty until a branch exists.
         "category": previous.get("category") if previous.get("category") in CATEGORIES else None,
         "categories": [c for c in (previous.get("categories") or []) if c in CATEGORIES],
@@ -836,6 +864,7 @@ def business_out(doc: dict) -> BusinessOut:
         created_at=data.get("created_at"),
         updated_at=data.get("updated_at"),
         submitted_at=data.get("submitted_at"),
+        onboarding_step=onboarding_step_of(doc),
     )
 
 

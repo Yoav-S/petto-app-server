@@ -21,6 +21,11 @@ HOURS = {
 }
 
 ADMIN = patch.object(settings, "RAGLY_ADMIN_EMAILS", "uid_user_b@test.com")
+LOGO = "https://cdn.example.com/logo.jpg"
+
+
+def _stamp_logo(mock_db, business_id: str) -> None:
+    asyncio.run(mock_db.businesses.update_one({"_id": ObjectId(business_id)}, {"$set": {"photo": LOGO}}))
 
 
 def _details(**overrides):
@@ -87,6 +92,7 @@ def test_onboarding_creates_a_draft_with_an_owner_seat(client, mock_db):
 
     hidden = client.get("/api/v1/businesses/nearby?anywhere=true", headers=HEADERS_B)
     assert hidden.json()["items"] == []
+    assert body["onboarding_step"] == "description"
 
     second = client.post("/api/v1/businesses", json=_details(name="Second Clinic"), headers=HEADERS_A)
     assert second.status_code == 409
@@ -97,6 +103,32 @@ def test_onboarding_allows_an_empty_phone(client):
     created = client.post("/api/v1/businesses", json=_details(name="Quiet Clinic", phone=[]), headers=HEADERS_A)
     assert created.status_code == 201, created.text
     assert created.json()["phone"] == []
+    assert created.json()["onboarding_step"] == "description"
+
+
+def test_onboarding_step_is_saved_and_can_finish(client):
+    created = client.post("/api/v1/businesses", json=_details(name="Step Clinic", onboarding_step="logo"), headers=HEADERS_A)
+    assert created.status_code == 201, created.text
+    assert created.json()["onboarding_step"] == "logo"
+    done = client.patch(
+        f"/api/v1/businesses/{created.json()['id']}",
+        json=_details(name="Step Clinic", onboarding_step="done"),
+        headers=HEADERS_A,
+    )
+    assert done.status_code == 200, done.text
+    assert done.json()["onboarding_step"] == "done"
+
+
+def test_send_needs_a_picture_when_there_is_no_logo(client, mock_db):
+    business_id = client.post("/api/v1/businesses", json=_details(name="No Logo Clinic"), headers=HEADERS_A).json()["id"]
+    branch_id = client.post(f"/api/v1/businesses/{business_id}/locations", json=_branch(), headers=HEADERS_A).json()["id"]
+    sent = client.post(f"/api/v1/businesses/{business_id}/locations/{branch_id}/send", headers=HEADERS_A)
+    assert sent.status_code == 400
+    assert sent.json()["detail"]["code"] == "branch_incomplete"
+    assert "photo" in sent.json()["detail"]["fields"]
+    _stamp_logo(mock_db, business_id)
+    again = client.post(f"/api/v1/businesses/{business_id}/locations/{branch_id}/send", headers=HEADERS_A)
+    assert again.status_code == 200, again.text
 
 
 def test_name_check_and_taken_names(client, mock_db):
@@ -144,6 +176,7 @@ def test_first_branch_from_draft_to_published(client, mock_db):
     with admins as admin_mail, owner_mail as owner_mails, ADMIN:
         business = client.post("/api/v1/businesses", json=_details(), headers=HEADERS_A).json()
         business_id = business["id"]
+        _stamp_logo(mock_db, business_id)
 
         empty = client.post(f"/api/v1/businesses/{business_id}/locations", json={}, headers=HEADERS_A)
         assert empty.status_code == 201, empty.text
@@ -253,6 +286,7 @@ def test_reject_fix_and_resend(client, mock_db):
     admins, owner_mail = _mails()
     with admins, owner_mail as owner_mails, ADMIN:
         business_id = client.post("/api/v1/businesses", json=_details(locale="ru"), headers=HEADERS_A).json()["id"]
+        _stamp_logo(mock_db, business_id)
         branch_id = client.post(f"/api/v1/businesses/{business_id}/locations", json=_branch(), headers=HEADERS_A).json()["id"]
         client.post(f"/api/v1/businesses/{business_id}/locations/{branch_id}/send", headers=HEADERS_A)
 
@@ -312,6 +346,7 @@ def test_live_branch_keeps_its_address_and_new_service_waits(client, mock_db):
     admins, owner_mail = _mails()
     with admins as admin_mail, owner_mail, ADMIN:
         business_id = client.post("/api/v1/businesses", json=_details(), headers=HEADERS_A).json()["id"]
+        _stamp_logo(mock_db, business_id)
         branch_id = client.post(f"/api/v1/businesses/{business_id}/locations", json=_branch(), headers=HEADERS_A).json()["id"]
         client.post(f"/api/v1/businesses/{business_id}/locations/{branch_id}/send", headers=HEADERS_A)
         client.post(f"/api/v1/admin/locations/{branch_id}/approve", headers=HEADERS_B)
@@ -443,6 +478,7 @@ def test_admin_one_form_writes_the_same_documents_as_the_owner_flow(client, mock
     admins, owner_mail = _mails()
     with admins, owner_mail, ADMIN:
         owner_business = client.post("/api/v1/businesses", json=_details(), headers=HEADERS_A).json()
+        _stamp_logo(mock_db, owner_business["id"])
         branch_id = client.post(f"/api/v1/businesses/{owner_business['id']}/locations", json=_branch(), headers=HEADERS_A).json()["id"]
         client.post(f"/api/v1/businesses/{owner_business['id']}/locations/{branch_id}/send", headers=HEADERS_A)
         client.post(f"/api/v1/admin/locations/{branch_id}/approve", headers=HEADERS_B)
@@ -534,11 +570,12 @@ def test_admin_edits_details_and_branches_without_review(client, mock_db):
         del remaining
 
 
-def test_duplicate_place_is_flagged_for_the_admin(client):
+def test_duplicate_place_is_flagged_for_the_admin(client, mock_db):
     admins, owner_mail = _mails()
     with admins, owner_mail, ADMIN:
         client.post("/api/v1/admin/businesses", json=_admin_create(), headers=HEADERS_B)
         business_id = client.post("/api/v1/businesses", json=_details(name="Copycat"), headers=HEADERS_A).json()["id"]
+        _stamp_logo(mock_db, business_id)
         branch_id = client.post(f"/api/v1/businesses/{business_id}/locations", json=_branch(), headers=HEADERS_A).json()["id"]
         client.post(f"/api/v1/businesses/{business_id}/locations/{branch_id}/send", headers=HEADERS_A)
         queue = client.get("/api/v1/admin/review", headers=HEADERS_B).json()

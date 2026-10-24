@@ -31,6 +31,7 @@ BusinessStatus = Literal[
 ]
 BranchStatus = Literal["draft", "pending_review", "published", "rejected"]
 Locale = Literal["en", "ro", "ru", "he"]
+OnboardingStep = Literal["description", "logo", "phones", "email", "website", "instagram", "done"]
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
@@ -106,6 +107,8 @@ class BusinessDetails(BaseModel):
     website: Optional[str] = None
     instagram: Optional[str] = None
     locale: Optional[Locale] = None
+    """Owner wizard progress. Omitted on later edits so the saved step is kept."""
+    onboarding_step: Optional[OnboardingStep] = None
 
     @field_validator("phone")
     @classmethod
@@ -424,6 +427,7 @@ class BusinessOut(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
+    onboarding_step: OnboardingStep = "done"
     invitations: list[InvitationOut] = Field(default_factory=list)
     locations: list[LocationOut] = Field(default_factory=list)
 

@@ -1051,7 +1051,7 @@ async def _apply_details(
     )
     changed = {
         key: updated[key]
-        for key in ("name", "name_key", "phone", "email", "description", "website", "instagram", "locale", "updated_at")
+        for key in ("name", "name_key", "phone", "email", "description", "website", "instagram", "locale", "onboarding_step", "updated_at")
     }
     unset = {key: "" for key in ("phones", "latitude", "longitude", "photo_url") if key in business}
     try:

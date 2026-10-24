@@ -23,6 +23,7 @@ def _business(name: str, phone: list[str], address: str, lng: float, lat: float)
         "opening_hours": {"always_open": False, "mon": [{"open": "09:00", "close": "19:00"}]},
         "location": {"type": "Point", "coordinates": [lng, lat]},
         "owner_uid": USER_A_UID,
+        "photo": "https://cdn.example.com/logo.jpg",
         "created_at": datetime.now(timezone.utc),
     }
 
