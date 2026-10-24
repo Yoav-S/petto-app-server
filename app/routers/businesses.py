@@ -1013,6 +1013,12 @@ async def create_business(
         raise_api_error(403, ErrorCode.UNAUTHORIZED)
     uid = current_user["uid"]
     owner_email = (current_user.get("email") or "").strip().lower() or None
+    already = await db.businesses.find_one({"owner_uid": uid})
+    if already is None:
+        member = await db.business_members.find_one({"user_id": uid, "role": "owner"})
+        already = member
+    if already:
+        raise_api_error(409, ErrorCode.BUSINESS_EXISTS)
     await _ensure_unique_name(db, body.name)
     now = datetime.now(timezone.utc)
     person = await db.users.find_one({"firebase_uid": uid}) or {}

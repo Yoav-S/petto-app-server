@@ -88,6 +88,16 @@ def test_onboarding_creates_a_draft_with_an_owner_seat(client, mock_db):
     hidden = client.get("/api/v1/businesses/nearby?anywhere=true", headers=HEADERS_B)
     assert hidden.json()["items"] == []
 
+    second = client.post("/api/v1/businesses", json=_details(name="Second Clinic"), headers=HEADERS_A)
+    assert second.status_code == 409
+    assert second.json()["detail"]["code"] == "business_exists"
+
+
+def test_onboarding_allows_an_empty_phone(client):
+    created = client.post("/api/v1/businesses", json=_details(name="Quiet Clinic", phone=[]), headers=HEADERS_A)
+    assert created.status_code == 201, created.text
+    assert created.json()["phone"] == []
+
 
 def test_name_check_and_taken_names(client, mock_db):
     free = client.get("/api/v1/businesses/name-check", params={"name": "Zoomama"}, headers=HEADERS_A)
@@ -396,7 +406,7 @@ def test_bad_hours_and_contacts_are_refused(client):
     plain = client.post(
         "/api/v1/businesses",
         json=_details(name="Plain", website="vetasist.com.md", instagram="https://instagram.com/zoomama", email=None, description=None),
-        headers=HEADERS_A,
+        headers=HEADERS_B,
     )
     assert plain.status_code == 201, plain.text
     assert plain.json()["website"] == "https://vetasist.com.md"

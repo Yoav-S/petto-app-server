@@ -38,6 +38,7 @@ class ErrorCode(StrEnum):
     BUSINESS_INCOMPLETE = "business_incomplete"
     BUSINESS_NOT_PENDING = "business_not_pending"
     BUSINESS_NAME_TAKEN = "business_name_taken"
+    BUSINESS_EXISTS = "business_exists"
     BRANCH_INCOMPLETE = "branch_incomplete"
     BRANCH_NOT_PENDING = "branch_not_pending"
     BRANCH_NOT_EDITABLE = "branch_not_editable"
