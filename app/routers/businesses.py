@@ -60,6 +60,7 @@ from app.models.business import (
     BusinessSession,
     EventOut,
     InvitationOut,
+    ListingVisibility,
     LocationOut,
     NameCheck,
     OwnerInvite,
@@ -588,6 +589,7 @@ async def nearby_businesses(
     if category:
         query["$or"] = [{"categories": category}, {"category": category}]
     business_rows = await db.businesses.find(query).to_list(None)
+    business_rows = [doc for doc in business_rows if docs.business_visible(doc)]
     grouped = await docs.branches_for(db, [str(doc["_id"]) for doc in business_rows])
     user_country = None
     if not anywhere and latitude is not None and longitude is not None:
@@ -708,7 +710,7 @@ async def business_place(
     if not ObjectId.is_valid(business_id):
         raise_api_error(404, ErrorCode.NOT_FOUND)
     doc = await db.businesses.find_one({"_id": ObjectId(business_id), "status": "published"})
-    if not doc:
+    if not doc or not docs.business_visible(doc):
         raise_api_error(404, ErrorCode.NOT_FOUND)
     branches = docs.public_branches(await docs.ensure_branches(db, doc))
     if latitude is not None and longitude is not None:
@@ -1089,6 +1091,29 @@ async def admin_update_business(
     _require_admin(current_user)
     business = await _business_or_404(db, business_id)
     return await _apply_details(db, business, body, current_user)
+
+
+@router.patch("/businesses/{business_id}/visibility", response_model=BusinessOut)
+async def set_business_visibility(
+    business_id: str,
+    body: ListingVisibility,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Hide or show the business in the app at once. Owners and admins."""
+    business = await _business_or_404(db, business_id)
+    await _require_brand_owner(db, business, current_user)
+    if docs.business_status(business) != "published":
+        raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+    now = datetime.now(timezone.utc)
+    update = {"visible": body.visible, "updated_at": now}
+    await db.businesses.update_one({"_id": business["_id"]}, {"$set": update})
+    business.update(update)
+    await docs.record_event(
+        db, business=business, kind="business_resumed" if body.visible else "business_paused",
+        audience="owner" if _is_admin(current_user) else "admins", actor=_actor(current_user),
+    )
+    return await _full_out(db, business)
 
 
 @router.delete("/businesses/{business_id}", status_code=204)

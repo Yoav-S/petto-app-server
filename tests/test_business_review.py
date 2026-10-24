@@ -363,6 +363,16 @@ def test_live_branch_keeps_its_address_and_new_service_waits(client, mock_db):
         assert resumed.json()["visible"] is True
         assert len(client.get("/api/v1/businesses/nearby?anywhere=true", headers=HEADERS_B).json()["items"]) == 1
 
+        hidden = client.patch(f"/api/v1/businesses/{business_id}/visibility", json={"visible": False}, headers=HEADERS_A)
+        assert hidden.status_code == 200, hidden.text
+        assert hidden.json()["visible"] is False
+        assert hidden.json()["status"] == "published"
+        assert client.get("/api/v1/businesses/nearby?anywhere=true", headers=HEADERS_B).json()["items"] == []
+        assert client.get(f"/api/v1/businesses/{business_id}", headers=HEADERS_B).status_code == 404
+        shown = client.patch(f"/api/v1/businesses/{business_id}/visibility", json={"visible": True}, headers=HEADERS_B)
+        assert shown.json()["visible"] is True
+        assert len(client.get("/api/v1/businesses/nearby?anywhere=true", headers=HEADERS_B).json()["items"]) == 1
+
 
 def test_bad_hours_and_contacts_are_refused(client):
     business_id = client.post("/api/v1/businesses", json=_details(), headers=HEADERS_A).json()["id"]

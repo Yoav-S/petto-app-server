@@ -516,6 +516,10 @@ def branch_status(doc: dict) -> str:
     return "published"
 
 
+def business_visible(doc: dict) -> bool:
+    return bool(doc.get("visible", True))
+
+
 def branch_visible(doc: dict) -> bool:
     return bool(doc.get("visible", True))
 
@@ -767,6 +771,7 @@ def build_business(
         "photos": gallery(previous),
         "locale": (details.locale or (business_locale(previous) if existing else None) or locale or "en"),
         "status": status if status in BUSINESS_STATUSES else "draft",
+        "visible": bool(previous["visible"]) if "visible" in previous else True,
         "owner_uid": owner_uid if owner_uid is not None else optional_text(previous.get("owner_uid")),
         "owner_email": (owner_email or optional_text(previous.get("owner_email")) or None),
         "source": text(previous.get("source")) or source,
@@ -811,6 +816,7 @@ def business_out(doc: dict) -> BusinessOut:
         categories=categories,
         city=text(data.get("city")),
         status=business_status(doc),
+        visible=bool(doc.get("visible", True)),
         address=text(data.get("address")),
         timezone=valid_timezone(data.get("timezone")) or DEFAULT_TIMEZONE,
         opening_hours=OpeningHours(**hours_doc(doc.get("opening_hours"))),

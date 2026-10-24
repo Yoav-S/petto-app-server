@@ -181,7 +181,7 @@ async def _migrate_business_branches(db) -> None:
                 main["is_main"] = True
                 changed = True
         mirrored = docs.mirror_fields(business, rows) if rows else {}
-        needs_keys = any(key not in business for key in ("categories", "locale", "field_errors", "admin_notes", "photos"))
+        needs_keys = any(key not in business for key in ("categories", "locale", "field_errors", "admin_notes", "photos", "visible"))
         stale_mirror = any(business.get(key) != value for key, value in mirrored.items())
         if changed or needs_keys or stale_mirror:
             fill = {
@@ -191,6 +191,7 @@ async def _migrate_business_branches(db) -> None:
                 "admin_notes": docs.notes(business.get("admin_notes")),
                 "photos": docs.gallery(business),
                 "status": docs.business_status(business),
+                "visible": bool(business.get("visible", True)),
                 **mirrored,
             }
             if "source" not in business:

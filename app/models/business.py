@@ -307,6 +307,12 @@ class BranchVisibility(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=300)
 
 
+class ListingVisibility(BaseModel):
+    """Hide or show the whole business in the app. Takes effect immediately."""
+
+    visible: bool
+
+
 class BranchApprove(BaseModel):
     field_notes: dict[str, str] = Field(default_factory=dict)
 
@@ -397,6 +403,8 @@ class BusinessOut(BaseModel):
     categories: list[BusinessCategory] = Field(default_factory=list)
     city: str = ""
     status: BusinessStatus
+    """False hides every branch of this business from the app. Not a review status."""
+    visible: bool = True
     address: str = ""
     timezone: str = "Europe/Chisinau"
     opening_hours: OpeningHours = Field(default_factory=OpeningHours)
