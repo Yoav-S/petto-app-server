@@ -72,6 +72,75 @@ def test_nearby_returns_one_card_for_the_closest_branch(client, mock_db):
     assert "Str. Pending 1" not in branches
 
 
+def test_nearby_marks_some_services_closed(client, mock_db):
+    """A live vet and a closed groomer on the same branch is 'some services closed'."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("Europe/Chisinau")
+
+    async def seed():
+        business = _business("ZooCentru", ["+373 22 000 000"], "Str. București 45", 28.86, 47.02)
+        business["categories"] = ["veterinarian", "groomer"]
+        result = await mock_db.businesses.insert_one(business)
+        await mock_db.business_locations.insert_one(
+            {
+                "business_id": str(result.inserted_id),
+                "address": "Str. București 45",
+                "city": "Chișinău",
+                "timezone": "Europe/Chisinau",
+                "location": {"type": "Point", "coordinates": [28.86, 47.02]},
+                "phone": [],
+                "status": "published",
+                "services": [
+                    {"category": "veterinarian", "opening_hours": {"always_open": True}, "status": "published", "visible": True},
+                    {
+                        "category": "groomer",
+                        "opening_hours": {
+                            "always_open": False,
+                            "mon": [],
+                            "tue": [],
+                            "wed": [],
+                            "thu": [],
+                            "fri": [],
+                            "sat": [{"open": "10:00", "close": "18:00"}],
+                            "sun": [],
+                        },
+                        "status": "published",
+                        "visible": True,
+                    },
+                ],
+            }
+        )
+
+    asyncio.run(seed())
+
+    class Clock(datetime):
+        current = datetime(2026, 9, 30, 12, 0, tzinfo=zone)
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls.current
+            return cls.current.astimezone(tz)
+
+    with patch("app.business_docs.datetime", Clock):
+        nearby = client.get("/api/v1/businesses/nearby", headers=HEADERS_A, params={"latitude": 47.02, "longitude": 28.86})
+        assert nearby.status_code == 200, nearby.text
+        card = nearby.json()["items"][0]
+        assert card["open_now"] is True
+        assert card["some_services_closed"] is True
+        groomer = client.get(
+            "/api/v1/businesses/nearby",
+            headers=HEADERS_A,
+            params={"latitude": 47.02, "longitude": 28.86, "category": "groomer"},
+        )
+        only = groomer.json()["items"][0]
+        assert only["open_now"] is False
+        assert only["some_services_closed"] is False
+        assert only["opens_at"] == "10:00"
+
+
 def test_owner_sees_every_business_and_can_add_a_branch(client, mock_db):
     async def seed():
         await mock_db.businesses.insert_one(_business("Zoomama", ["+373 22 000 000"], "Str. București 45", 28.86, 47.02))

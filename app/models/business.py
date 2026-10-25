@@ -528,6 +528,7 @@ class BusinessPlace(BaseModel):
     rating: Optional[float] = None
     open_now: Optional[bool] = None
     open_24_7: bool = False
+    some_services_closed: bool = False
     closes_at: Optional[str] = None
     opens_at: Optional[str] = None
     next_open_day: Optional[Weekday] = None

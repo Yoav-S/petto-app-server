@@ -411,6 +411,25 @@ def schedule(hours: dict, tz_name: str | None) -> dict:
     return closed
 
 
+def card_schedule(branch: dict, business: dict | None = None, *, category: str | None = None) -> dict:
+    """Hours for a Near you card. Mixed live services become some_services_closed."""
+    tz_name = branch_timezone(branch, business)
+    if category:
+        return {**schedule(branch_hours(branch, business, category=category), tz_name), "some_services_closed": False}
+    services = public_services(branch, business)
+    if len(services) <= 1:
+        hours = services[0]["opening_hours"] if services else branch_hours(branch, business)
+        return {**schedule(hours, tz_name), "some_services_closed": False}
+    rows = [schedule(service["opening_hours"], tz_name) for service in services]
+    known = [row for row in rows if row["open_now"] is not None]
+    opened = [row for row in known if row["open_now"]]
+    closed_rows = [row for row in known if row["open_now"] is False]
+    if opened and closed_rows:
+        return {**opened[0], "some_services_closed": True}
+    base = opened[0] if opened else closed_rows[0] if closed_rows else rows[0]
+    return {**base, "some_services_closed": False}
+
+
 # ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------

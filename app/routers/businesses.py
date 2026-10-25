@@ -628,7 +628,6 @@ async def nearby_businesses(
             card_category = cats[0] if cats else _public_card_category(doc, [branch], category)
             if card_category is None:
                 continue
-            hours = docs.branch_hours(branch, doc, category=category)
             places.append(
                 BusinessPlace(
                     id=business_id,
@@ -641,7 +640,7 @@ async def nearby_businesses(
                     address=docs.text(branch.get("address")) or docs.text(doc.get("address")),
                     location_count=1,
                     location_id=str(branch.get("_id")) if branch.get("_id") is not None else None,
-                    **docs.schedule(hours, docs.branch_timezone(branch, doc)),
+                    **docs.card_schedule(branch, doc, category=category),
                 )
             )
     if not anywhere and latitude is not None and longitude is not None:
