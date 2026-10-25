@@ -448,6 +448,7 @@ class TeamInvite(BaseModel):
 
 
 class BusinessCounts(BaseModel):
+    total: int = 0
     pending: int = 0
     published: int = 0
     rejected: int = 0
@@ -457,6 +458,7 @@ class BusinessCounts(BaseModel):
 class BusinessPage(BaseModel):
     items: list[BusinessOut]
     has_more: bool = False
+    total: int = 0
 
 
 class NameCheck(BaseModel):

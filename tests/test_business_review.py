@@ -698,6 +698,7 @@ def test_summary_counts_and_pages(client):
         summary = client.get("/api/v1/admin/businesses/summary", headers=HEADERS_B)
         assert summary.status_code == 200, summary.text
         assert summary.json()["published"] == 1
+        assert summary.json()["total"] == 1
         assert summary.json()["deleted"] == 0
 
         page = client.get("/api/v1/admin/businesses/page?limit=1&status=published&category=pharmacy", headers=HEADERS_B)
@@ -705,6 +706,7 @@ def test_summary_counts_and_pages(client):
         assert len(page.json()["items"]) == 1
         assert page.json()["items"][0]["id"] == business_id
         assert page.json()["has_more"] is False
+        assert page.json()["total"] == 1
 
         removed = client.delete(f"/api/v1/admin/businesses/{business_id}", headers=HEADERS_B)
         assert removed.status_code == 204

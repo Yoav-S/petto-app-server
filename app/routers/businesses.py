@@ -2019,7 +2019,9 @@ async def business_summary(
     ).to_list(None)
     waiting = {str(row.get("business_id")) for row in waiting_rows}
     deleted = await db.business_deletions.count_documents({})
+    total = await db.businesses.count_documents({})
     return BusinessCounts(
+        total=total,
         pending=max(counts["pending_review"], len(waiting)),
         published=counts["published"],
         rejected=counts["rejected"],
@@ -2086,7 +2088,8 @@ async def page_businesses(
     else:
         rows = await db.businesses.find(match).sort(sort_spec).skip(skip).limit(limit + 1).to_list(None)
     has_more = len(rows) > limit
-    return BusinessPage(items=await _decorate(db, rows[:limit]), has_more=has_more)
+    total = await db.businesses.count_documents(match)
+    return BusinessPage(items=await _decorate(db, rows[:limit]), has_more=has_more, total=total)
 
 
 @router.get("/admin/businesses", response_model=list[BusinessOut])
