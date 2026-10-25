@@ -654,7 +654,7 @@ def test_logo_gallery_and_branch_photo(client):
     image = ("clinic.png", b"\x89PNG\r\n\x1a\nfake", "image/png")
     urls = [
         f"https://firebasestorage.googleapis.com/v0/b/bucket/o/businesses%2F1%2F{name}.png?alt=media&token=x"
-        for name in ("logo", "a", "b", "branch")
+        for name in ("logo", "a", "b", "branch", "admin")
     ]
     with ADMIN, patch("app.routers.businesses.upload_business_image", side_effect=urls) as upload, patch(
         "app.routers.businesses.delete_business_image"
@@ -683,6 +683,12 @@ def test_logo_gallery_and_branch_photo(client):
         assert cleared.json()["photo"] is None
         no_logo = client.delete(f"/api/v1/businesses/{business_id}/logo", headers=HEADERS_A)
         assert no_logo.json()["photo"] is None
+
+        admin_logo = client.post(f"/api/v1/admin/businesses/{business_id}/logo", files={"file": image}, headers=HEADERS_B)
+        assert admin_logo.status_code == 200, admin_logo.text
+        assert admin_logo.json()["photo"].startswith("https://")
+        cleared_admin = client.delete(f"/api/v1/admin/businesses/{business_id}/logo", headers=HEADERS_B)
+        assert cleared_admin.json()["photo"] is None
 
 
 def test_summary_counts_and_pages(client):

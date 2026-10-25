@@ -1281,6 +1281,30 @@ async def owner_clear_logo(
     return await _clear_logo(db, business)
 
 
+@router.post("/admin/businesses/{business_id}/logo", response_model=BusinessOut)
+async def admin_set_logo(
+    business_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Admins can set the listing logo without being the owner."""
+    _require_admin(current_user)
+    business = await _business_or_404(db, business_id)
+    return await _set_logo(db, business, file)
+
+
+@router.delete("/admin/businesses/{business_id}/logo", response_model=BusinessOut)
+async def admin_clear_logo(
+    business_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    _require_admin(current_user)
+    business = await _business_or_404(db, business_id)
+    return await _clear_logo(db, business)
+
+
 @router.post("/admin/businesses/{business_id}/photos", response_model=BusinessOut)
 async def admin_add_business_photo(
     business_id: str,
