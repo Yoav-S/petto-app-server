@@ -967,3 +967,30 @@ def test_report_emails_admins_the_review_author_and_reporter(client, mock_db):
     assert "yoav@example.com" in mailed
     assert "mia@example.com" in mailed
     assert "Report id:" in mailed
+
+
+def test_admin_can_list_reviews_for_unpublished_business(client, mock_db):
+    from datetime import datetime, timezone
+
+    doc = _legacy("Draft Vet", status="draft")
+    asyncio.run(mock_db.businesses.insert_one(doc))
+    asyncio.run(
+        mock_db.business_reviews.insert_one(
+            {
+                "business_id": str(doc["_id"]),
+                "user_id": "uid_user_a",
+                "rating": 4,
+                "comment": "Quiet clinic.",
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+    )
+    public = client.get(f"/api/v1/businesses/{doc['_id']}/reviews", headers=HEADERS_A)
+    assert public.status_code == 404
+    with ADMIN:
+        listed = client.get(f"/api/v1/admin/businesses/{doc['_id']}/reviews", headers=HEADERS_B)
+        assert listed.status_code == 200, listed.text
+        assert listed.json()[0]["rating"] == 4
+        denied = client.get(f"/api/v1/admin/businesses/{doc['_id']}/reviews", headers=HEADERS_A)
+        assert denied.status_code == 403

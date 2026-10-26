@@ -2116,6 +2116,18 @@ async def admin_get_business(
     return await _full_out(db, business)
 
 
+@router.get("/admin/businesses/{business_id}/reviews", response_model=list[PlaceReview])
+async def admin_list_reviews(
+    business_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Every review on this business, including unpublished listings."""
+    _require_admin(current_user)
+    await _business_or_404(db, business_id)
+    return await _place_reviews(db, business_id, current_user["uid"], limit=200)
+
+
 @router.post("/admin/businesses/{business_id}/invitations", response_model=InvitationOut, status_code=201)
 async def admin_invite_owner(
     business_id: str,
