@@ -189,6 +189,9 @@ async def _full_out(db: AsyncIOMotorDatabase, business: dict) -> BusinessOut:
     out.invitations = invitations.get(out.id, [])
     if out.id in owner_ids:
         out.owned = True
+    image = docs.profile_image(business, rows)
+    if image:
+        out.photo = image
     return out
 
 
@@ -205,6 +208,9 @@ async def _decorate(db: AsyncIOMotorDatabase, business_docs: list[dict]) -> list
         out.invitations = invitations.get(out.id, [])
         if out.id in owner_ids:
             out.owned = True
+        image = docs.profile_image(doc, rows)
+        if image:
+            out.photo = image
         decorated.append(out)
     return decorated
 
@@ -541,13 +547,8 @@ def _distance_between(latitude: float | None, longitude: float | None, point: di
     return round(_distance_km(latitude, longitude, pair[0], pair[1]), 1)
 
 
-def _place_image(doc: dict) -> str | None:
-    for url in docs.gallery(doc):
-        return url
-    photo = docs.logo(doc)
-    if photo and photo.startswith("https://"):
-        return photo
-    return None
+def _place_image(doc: dict, branches: list[dict] | None = None) -> str | None:
+    return docs.profile_image(doc, branches)
 
 
 async def _ratings(db: AsyncIOMotorDatabase, business_ids: list[str]) -> dict[str, float]:
@@ -635,7 +636,7 @@ async def nearby_businesses(
                     category=card_category,
                     categories=cats,
                     city=docs.text(branch.get("city")) or docs.text(doc.get("city")),
-                    image=_place_image(doc),
+                    image=_place_image(doc, rows),
                     distance_km=_distance_between(latitude, longitude, docs.point_doc(branch.get("location"))),
                     address=docs.text(branch.get("address")) or docs.text(doc.get("address")),
                     location_count=1,
@@ -743,7 +744,7 @@ async def business_place(
     closest_distance = None
     for branch in branches:
         distance = _distance_between(latitude, longitude, docs.point_doc(branch.get("location")))
-        listed = docs.place_branch(branch, doc, business_phone, distance)
+        listed = docs.place_branch(branch, doc, business_phone, distance, branches=branches)
         public.append(listed)
         if distance is not None and (closest_distance is None or distance < closest_distance):
             closest, closest_branch, closest_distance = listed, branch, distance
@@ -768,7 +769,7 @@ async def business_place(
         name=docs.text(doc.get("name")),
         category=primary,
         categories=categories,
-        image=_place_image(doc),
+        image=_place_image(doc, branches),
         rating=ratings.get(business_id),
         description=docs.optional_text(doc.get("description")),
         address=closest.address if closest else docs.text(doc.get("address")),
@@ -783,7 +784,7 @@ async def business_place(
         location_id=closest.id if closest else None,
         distance_km=closest_distance if closest_distance is not None else (closest.distance_km if closest else None),
         city=closest.city if closest and closest.city else docs.text(doc.get("city")),
-        **docs.schedule(hours, zone),
+        **docs.public_schedule(hours, zone),
     )
 
 
@@ -1615,6 +1616,9 @@ async def set_branch_photo(
     await db.business_locations.update_one({"_id": row["_id"]}, {"$set": {"photo": url, "updated_at": now}})
     row["photo"] = url
     row["updated_at"] = now
+    if not docs.profile_image(business):
+        await db.businesses.update_one({"_id": business["_id"]}, {"$set": {"photo": url, "updated_at": now}})
+        business["photo"] = url
     if previous and previous != url:
         _forget_image(str(business["_id"]), previous)
     return docs.branch_out(row, business)

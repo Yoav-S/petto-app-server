@@ -682,13 +682,13 @@ def test_logo_gallery_and_branch_photo(client):
         cleared = client.delete(f"/api/v1/businesses/{business_id}/locations/{branch_id}/photo", headers=HEADERS_A)
         assert cleared.json()["photo"] is None
         no_logo = client.delete(f"/api/v1/businesses/{business_id}/logo", headers=HEADERS_A)
-        assert no_logo.json()["photo"] is None
+        assert no_logo.json()["photo"] == urls[2]
 
         admin_logo = client.post(f"/api/v1/admin/businesses/{business_id}/logo", files={"file": image}, headers=HEADERS_B)
         assert admin_logo.status_code == 200, admin_logo.text
         assert admin_logo.json()["photo"].startswith("https://")
         cleared_admin = client.delete(f"/api/v1/admin/businesses/{business_id}/logo", headers=HEADERS_B)
-        assert cleared_admin.json()["photo"] is None
+        assert cleared_admin.json()["photo"] == urls[2]
 
 
 def test_summary_counts_and_pages(client):

@@ -209,6 +209,28 @@ def clean_photo(value: object) -> str | None:
     return photo
 
 
+def https_url(value: object) -> str | None:
+    photo = clean_photo(value)
+    if photo and photo.startswith("https://"):
+        return photo
+    return None
+
+
+def profile_image(business: dict, branches: list[dict] | None = None) -> str | None:
+    """The listing photo every branch shares: logo, then gallery, then a branch photo."""
+    photo = https_url(logo(business))
+    if photo:
+        return photo
+    photos = gallery(business)
+    if photos:
+        return photos[0]
+    for branch in branches or []:
+        photo = https_url(branch.get("photo"))
+        if photo:
+            return photo
+    return None
+
+
 def utc(value: object) -> datetime | None:
     if not isinstance(value, datetime):
         return None
@@ -397,7 +419,7 @@ def schedule(hours: dict, tz_name: str | None) -> dict:
             return {**closed, "open_now": True, "closes_at": _clock(end)}
     later = [start for start, _end in slots_for(0) if start > now_min]
     if later:
-        return {**closed, "opens_at": _clock(min(later))}
+        return {**closed, "opens_at": _clock(min(later)), "opens_in_days": 0}
     for offset in range(1, 15):
         upcoming = slots_for(offset)
         if not upcoming:
@@ -407,27 +429,50 @@ def schedule(hours: dict, tz_name: str | None) -> dict:
             "opens_at": _clock(min(start for start, _end in upcoming)),
             "next_open_day": DAYS[(today + offset) % 7],
             "opens_tomorrow": offset == 1,
+            "opens_in_days": offset,
         }
     return closed
+
+
+def _public_hours(row: dict) -> dict:
+    return {key: value for key, value in row.items() if key != "opens_in_days"}
+
+
+def public_schedule(hours: dict, tz_name: str | None) -> dict:
+    """Card/detail hours without internal ranking keys."""
+    return _public_hours(schedule(hours, tz_name))
+
+
+def _soonest_open(rows: list[dict]) -> dict:
+    ranked = [row for row in rows if row.get("opens_at")]
+    if not ranked:
+        return rows[0]
+    return min(
+        ranked,
+        key=lambda row: (row.get("opens_in_days", 99), row.get("opens_at") or "99:99"),
+    )
 
 
 def card_schedule(branch: dict, business: dict | None = None, *, category: str | None = None) -> dict:
     """Hours for a Near you card. Mixed live services become some_services_closed."""
     tz_name = branch_timezone(branch, business)
     if category:
-        return {**schedule(branch_hours(branch, business, category=category), tz_name), "some_services_closed": False}
+        return {**_public_hours(schedule(branch_hours(branch, business, category=category), tz_name)), "some_services_closed": False}
     services = public_services(branch, business)
     if len(services) <= 1:
         hours = services[0]["opening_hours"] if services else branch_hours(branch, business)
-        return {**schedule(hours, tz_name), "some_services_closed": False}
+        return {**_public_hours(schedule(hours, tz_name)), "some_services_closed": False}
     rows = [schedule(service["opening_hours"], tz_name) for service in services]
     known = [row for row in rows if row["open_now"] is not None]
     opened = [row for row in known if row["open_now"]]
     closed_rows = [row for row in known if row["open_now"] is False]
     if opened and closed_rows:
-        return {**opened[0], "some_services_closed": True}
-    base = opened[0] if opened else closed_rows[0] if closed_rows else rows[0]
-    return {**base, "some_services_closed": False}
+        return {**_public_hours(opened[0]), "some_services_closed": True}
+    if opened:
+        return {**_public_hours(opened[0]), "some_services_closed": False}
+    if closed_rows:
+        return {**_public_hours(_soonest_open(closed_rows)), "some_services_closed": False}
+    return {**_public_hours(rows[0] if rows else schedule(empty_hours(provided=False), tz_name)), "some_services_closed": False}
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +790,8 @@ def place_branch(
     business: dict,
     business_phone: list[str],
     distance_km: float | None,
+    *,
+    branches: list[dict] | None = None,
 ) -> PlaceLocation:
     """A branch on the public business screen."""
     branch_phone = phones(doc.get("phone"))
@@ -769,7 +816,7 @@ def place_branch(
             )
             for service in services
         ],
-        photo=clean_photo(doc.get("photo")) if str(clean_photo(doc.get("photo")) or "").startswith("https://") else None,
+        photo=profile_image(business, branches if branches is not None else [doc]),
     )
 
 

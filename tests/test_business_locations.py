@@ -139,6 +139,65 @@ def test_nearby_marks_some_services_closed(client, mock_db):
         assert only["open_now"] is False
         assert only["some_services_closed"] is False
         assert only["opens_at"] == "10:00"
+        assert only["next_open_day"] == "sat"
+
+
+def test_nearby_closed_card_uses_the_soonest_next_open(client, mock_db):
+    """A closed vet with no hours must not hide a groomer that opens in two days."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("Europe/Chisinau")
+    empty = {day: [] for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")}
+
+    async def seed():
+        business = _business("ZooCentru", ["+373 22 000 000"], "Str. București 45", 28.86, 47.02)
+        business["categories"] = ["veterinarian", "groomer"]
+        result = await mock_db.businesses.insert_one(business)
+        await mock_db.business_locations.insert_one(
+            {
+                "business_id": str(result.inserted_id),
+                "address": "Str. București 45",
+                "city": "Chișinău",
+                "timezone": "Europe/Chisinau",
+                "location": {"type": "Point", "coordinates": [28.86, 47.02]},
+                "phone": [],
+                "status": "published",
+                "services": [
+                    {"category": "veterinarian", "opening_hours": {"always_open": False, **empty}, "status": "published", "visible": True},
+                    {
+                        "category": "groomer",
+                        "opening_hours": {
+                            "always_open": False,
+                            **empty,
+                            "mon": [{"open": "09:30", "close": "18:00"}],
+                        },
+                        "status": "published",
+                        "visible": True,
+                    },
+                ],
+            }
+        )
+
+    asyncio.run(seed())
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 24, 12, 0, tzinfo=zone)
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls.current
+            return cls.current.astimezone(tz)
+
+    with patch("app.business_docs.datetime", Clock):
+        nearby = client.get("/api/v1/businesses/nearby", headers=HEADERS_A, params={"latitude": 47.02, "longitude": 28.86})
+        assert nearby.status_code == 200, nearby.text
+        card = nearby.json()["items"][0]
+        assert card["open_now"] is False
+        assert card["opens_at"] == "09:30"
+        assert card["next_open_day"] == "mon"
+        assert card["opens_tomorrow"] is False
 
 
 def test_owner_sees_every_business_and_can_add_a_branch(client, mock_db):
@@ -278,3 +337,36 @@ def test_startup_migration_fills_services_and_mirrors_once(client, mock_db):
     detail = client.get(f"/api/v1/businesses/{vetgor['_id']}", headers=HEADERS_A).json()
     assert detail["phone"] == ["+373 606 97 607"]
     assert detail["locations"][0]["address"] == "str. Columna 59"
+
+
+def test_listing_uses_branch_photo_when_business_has_no_logo(client, mock_db):
+    """Admin list and every branch card share the same business-level photo."""
+    with ADMIN:
+        async def seed():
+            payload = _business("Paw House", ["+373 22 000 000"], "Str. A 1", 28.86, 47.02)
+            payload["photo"] = None
+            result = await mock_db.businesses.insert_one(payload)
+            business_id = str(result.inserted_id)
+            await mock_db.business_locations.insert_one(
+                {**_old_branch(business_id, "Str. A 1", 28.86, 47.02, []), "photo": "https://cdn.example.com/branch.jpg"}
+            )
+            await mock_db.business_locations.insert_one(_old_branch(business_id, "Str. B 2", 28.80, 47.01, []))
+            return business_id
+
+        business_id = asyncio.run(seed())
+        listed = client.get("/api/v1/admin/businesses/page?limit=20", headers=HEADERS_B)
+        assert listed.status_code == 200, listed.text
+        row = next(item for item in listed.json()["items"] if item["id"] == business_id)
+        assert row["photo"] == "https://cdn.example.com/branch.jpg"
+
+        nearby = client.get("/api/v1/businesses/nearby", headers=HEADERS_A, params={"latitude": 47.02, "longitude": 28.86})
+        assert nearby.status_code == 200, nearby.text
+        cards = [item for item in nearby.json()["items"] if item["id"] == business_id]
+        assert cards
+        assert {item["image"] for item in cards} == {"https://cdn.example.com/branch.jpg"}
+
+        detail = client.get(f"/api/v1/businesses/{business_id}", headers=HEADERS_A)
+        assert detail.status_code == 200, detail.text
+        body = detail.json()
+        assert body["image"] == "https://cdn.example.com/branch.jpg"
+        assert {item["photo"] for item in body["locations"]} == {"https://cdn.example.com/branch.jpg"}
