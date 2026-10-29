@@ -641,6 +641,18 @@ def branch_categories(branch: dict, business: dict | None = None, *, public_only
     return ordered
 
 
+def public_business_categories(business: dict, branches: list[dict]) -> list[str]:
+    """Every live service the business offers, across branches."""
+    found: list[str] = []
+    for branch in branches:
+        for category in branch_categories(branch, business, public_only=True):
+            if category not in found:
+                found.append(category)
+    preferred = [category for category in (business.get("categories") or []) if category in found]
+    extra = [category for category in found if category not in preferred]
+    return [*preferred, *extra]
+
+
 def branch_timezone(branch: dict, business: dict | None = None) -> str:
     return (
         valid_timezone(branch.get("timezone"))

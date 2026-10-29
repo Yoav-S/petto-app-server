@@ -265,11 +265,11 @@ def test_owner_sees_every_business_and_can_add_a_branch(client, mock_db):
     visible = client.get("/api/v1/businesses/nearby", headers=HEADERS_A, params={"latitude": 47.01, "longitude": 28.80})
     shown = [item for item in visible.json()["items"] if item["name"] == "Zoomama"]
     assert [item["address"] for item in shown] == ["Str. Alba Iulia 12", "Str. București 45"]
-    assert shown[0]["categories"] == ["groomer"]
-    assert shown[1]["categories"] == ["veterinarian"]
+    assert shown[0]["categories"] == ["veterinarian", "groomer"]
+    assert shown[1]["categories"] == ["veterinarian", "groomer"]
     groomers = client.get("/api/v1/businesses/nearby", headers=HEADERS_A, params={"latitude": 47.01, "longitude": 28.80, "category": "groomer"})
     assert [item["address"] for item in groomers.json()["items"]] == ["Str. Alba Iulia 12"]
-    assert groomers.json()["items"][0]["categories"] == ["groomer"]
+    assert groomers.json()["items"][0]["categories"] == ["veterinarian", "groomer"]
 
 
 def test_nearby_keeps_other_cities_in_the_same_country_only(client, mock_db):

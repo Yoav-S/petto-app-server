@@ -53,6 +53,7 @@ from app.models.business import (
     BusinessMembership,
     BusinessOut,
     BusinessPage,
+    DirectoryFacets,
     BusinessPlace,
     BusinessPlaceDetail,
     BusinessPlacePage,
@@ -594,8 +595,9 @@ async def nearby_businesses(
 ):
     """One card per live branch, closest first.
 
-    A category filter keeps only branches that offer that service, and the
-    chips and hours on the card are that service's.
+    A category filter keeps only branches that offer that service. Chips on
+    every card are all live services of the business, not that branch alone.
+    Hours on the card stay that branch's (or the filtered service's).
     """
     del current_user
     if category and category not in CATEGORIES:
@@ -613,20 +615,25 @@ async def nearby_businesses(
     for doc in business_rows:
         business_id = str(doc["_id"])
         rows = grouped.get(business_id) or await docs.ensure_branches(db, doc)
-        branches = docs.public_branches(rows)
+        public = docs.public_branches(rows)
+        business_cats = docs.public_business_categories(doc, public)
         if category:
             branches = [
-                branch for branch in branches
+                branch for branch in public
                 if category in docs.branch_categories(branch, doc, public_only=True)
             ]
         else:
-            branches = [branch for branch in branches if docs.public_services(branch, doc)]
+            branches = [branch for branch in public if docs.public_services(branch, doc)]
         for branch in branches:
             pair = docs.lat_lng(docs.point_doc(branch.get("location")))
             if user_country is not None and (pair is None or country_code(pair[0], pair[1]) != user_country):
                 continue
-            cats = [category] if category else docs.branch_categories(branch, doc, public_only=True)
-            card_category = cats[0] if cats else _public_card_category(doc, [branch], category)
+            cats = business_cats or ([category] if category else [])
+            card_category = (
+                category
+                if category and category in cats
+                else (cats[0] if cats else _public_card_category(doc, [branch], category))
+            )
             if card_category is None:
                 continue
             places.append(
@@ -634,7 +641,7 @@ async def nearby_businesses(
                     id=business_id,
                     name=docs.text(doc.get("name")),
                     category=card_category,
-                    categories=cats,
+                    categories=cats or [card_category],
                     city=docs.text(branch.get("city")) or docs.text(doc.get("city")),
                     image=_place_image(doc, rows),
                     distance_km=_distance_between(latitude, longitude, docs.point_doc(branch.get("location"))),
@@ -1973,6 +1980,54 @@ async def admin_create_business(
     return out
 
 
+def _and_match(*parts: dict) -> dict:
+    clauses: list[dict] = []
+    for part in parts:
+        if not part:
+            continue
+        if "$and" in part:
+            clauses.extend(part["$and"])
+        else:
+            clauses.append(part)
+    if not clauses:
+        return {}
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
+
+
+async def _directory_facets(
+    db: AsyncIOMotorDatabase,
+    status: str | None,
+    category: str | None,
+    q: str | None,
+    ownership: str,
+    owner_oids: list[ObjectId],
+) -> DirectoryFacets:
+    status_match = _page_match(None, category, q, ownership, owner_oids)
+    category_match = _page_match(status, None, q, ownership, owner_oids)
+    status_rows = await db.businesses.aggregate(
+        [
+            *([{"$match": status_match}] if status_match else []),
+            {"$group": {"_id": "$status", "n": {"$sum": 1}}},
+        ]
+    ).to_list(None)
+    by_status = {str(row["_id"]): int(row["n"]) for row in status_rows if row.get("_id")}
+    by_category = {"all": await db.businesses.count_documents(category_match)}
+    for name in CATEGORIES:
+        by_category[name] = await db.businesses.count_documents(
+            _and_match(category_match, {"$or": [{"categories": name}, {"category": name}]})
+        )
+    owned = await db.businesses.count_documents(_page_match(status, category, q, "owned", owner_oids))
+    unowned = await db.businesses.count_documents(_page_match(status, category, q, "unowned", owner_oids))
+    ownership_all = await db.businesses.count_documents(_page_match(status, category, q, "all", owner_oids))
+    return DirectoryFacets(
+        status={"all": sum(by_status.values()), **by_status},
+        category=by_category,
+        ownership={"all": ownership_all, "owned": owned, "unowned": unowned},
+    )
+
+
 def _page_match(status: str | None, category: str | None, q: str | None, ownership: str, owner_oids: list[ObjectId]) -> dict:
     clauses: list[dict] = []
     if status == "reviewed":
@@ -2052,12 +2107,11 @@ async def page_businesses(
     if category and category not in CATEGORIES:
         raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
     owner_oids: list[ObjectId] = []
-    if ownership != "all":
-        rows = await db.business_members.find({"role": "owner"}, {"business_id": 1}).to_list(None)
-        for row in rows:
-            business_id = str(row.get("business_id") or "")
-            if ObjectId.is_valid(business_id):
-                owner_oids.append(ObjectId(business_id))
+    member_rows = await db.business_members.find({"role": "owner"}, {"business_id": 1}).to_list(None)
+    for row in member_rows:
+        business_id = str(row.get("business_id") or "")
+        if ObjectId.is_valid(business_id):
+            owner_oids.append(ObjectId(business_id))
     match = _page_match(status, category, q, ownership, owner_oids)
     if sort == "name":
         sort_spec = [("name", 1), ("_id", 1)]
@@ -2092,7 +2146,8 @@ async def page_businesses(
         rows = await db.businesses.find(match).sort(sort_spec).skip(skip).limit(limit + 1).to_list(None)
     has_more = len(rows) > limit
     total = await db.businesses.count_documents(match)
-    return BusinessPage(items=await _decorate(db, rows[:limit]), has_more=has_more, total=total)
+    facets = await _directory_facets(db, status, category, q, ownership, owner_oids)
+    return BusinessPage(items=await _decorate(db, rows[:limit]), has_more=has_more, total=total, facets=facets)
 
 
 @router.get("/admin/businesses", response_model=list[BusinessOut])

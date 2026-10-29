@@ -455,10 +455,19 @@ class BusinessCounts(BaseModel):
     deleted: int = 0
 
 
+class DirectoryFacets(BaseModel):
+    """How many businesses match each filter option under the other current filters."""
+
+    status: dict[str, int] = Field(default_factory=dict)
+    category: dict[str, int] = Field(default_factory=dict)
+    ownership: dict[str, int] = Field(default_factory=dict)
+
+
 class BusinessPage(BaseModel):
     items: list[BusinessOut]
     has_more: bool = False
     total: int = 0
+    facets: DirectoryFacets = Field(default_factory=DirectoryFacets)
 
 
 class NameCheck(BaseModel):

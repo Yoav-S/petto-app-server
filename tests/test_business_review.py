@@ -707,6 +707,9 @@ def test_summary_counts_and_pages(client):
         assert page.json()["items"][0]["id"] == business_id
         assert page.json()["has_more"] is False
         assert page.json()["total"] == 1
+        assert page.json()["facets"]["status"]["published"] == 1
+        assert page.json()["facets"]["status"]["all"] == 1
+        assert page.json()["facets"]["category"]["pharmacy"] == 1
 
         removed = client.delete(f"/api/v1/admin/businesses/{business_id}", headers=HEADERS_B)
         assert removed.status_code == 204
