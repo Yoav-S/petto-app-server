@@ -423,19 +423,25 @@ def test_live_branch_keeps_its_address_and_new_service_waits(client, mock_db):
 
 def test_bad_hours_and_contacts_are_refused(client):
     business_id = client.post("/api/v1/businesses", json=_details(), headers=HEADERS_A).json()["id"]
-    backwards = client.post(
+    same_clock = client.post(
         f"/api/v1/businesses/{business_id}/locations",
-        json=_branch(services=[{"category": "groomer", "opening_hours": {**HOURS, "mon": [{"open": "18:00", "close": "09:00"}]}}]),
+        json=_branch(services=[{"category": "groomer", "opening_hours": {**HOURS, "mon": [{"open": "09:00", "close": "09:00"}]}}]),
         headers=HEADERS_A,
     )
-    assert backwards.status_code == 400
-    assert backwards.json()["detail"]["code"] == "branch_hours_invalid"
+    assert same_clock.status_code == 400
+    assert same_clock.json()["detail"]["code"] == "branch_hours_invalid"
     overlapping = client.post(
         f"/api/v1/businesses/{business_id}/locations",
         json=_branch(services=[{"category": "groomer", "opening_hours": {**HOURS, "mon": [{"open": "09:00", "close": "13:00"}, {"open": "12:00", "close": "18:00"}]}}]),
         headers=HEADERS_A,
     )
     assert overlapping.status_code == 400
+    overnight_clash = client.post(
+        f"/api/v1/businesses/{business_id}/locations",
+        json=_branch(services=[{"category": "groomer", "opening_hours": {**HOURS, "fri": [{"open": "08:00", "close": "02:00"}], "sat": [{"open": "01:00", "close": "13:00"}]}}]),
+        headers=HEADERS_A,
+    )
+    assert overnight_clash.status_code == 400
     bad_phone = client.post("/api/v1/businesses", json=_details(name="Other", phone=["call me"]), headers=HEADERS_A)
     assert bad_phone.status_code == 422
     bad_site = client.post("/api/v1/businesses", json=_details(name="Other", website="javascript:alert(1)"), headers=HEADERS_A)
@@ -449,6 +455,65 @@ def test_bad_hours_and_contacts_are_refused(client):
     assert plain.json()["website"] == "https://vetasist.com.md"
     assert plain.json()["instagram"] == "@zoomama"
     assert plain.json()["email"] is None
+
+
+def test_overnight_hours_close_the_next_morning(client, mock_db):
+    """Friday 08:00–02:00 stays open past midnight and is stored as one slot."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    business_id = client.post("/api/v1/businesses", json=_details(), headers=HEADERS_A).json()["id"]
+    saved = client.post(
+        f"/api/v1/businesses/{business_id}/locations",
+        json=_branch(services=[{"category": "groomer", "opening_hours": {**HOURS, "fri": [{"open": "08:00", "close": "02:00"}], "sat": []}}]),
+        headers=HEADERS_A,
+    )
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["services"][0]["opening_hours"]["fri"] == [{"open": "08:00", "close": "02:00"}]
+
+    asyncio.run(
+        mock_db.businesses.insert_one(
+            _legacy(
+                "Night Clinic",
+                opening_hours={
+                    "mon": [],
+                    "tue": [],
+                    "wed": [],
+                    "thu": [],
+                    "fri": [{"open": "08:00", "close": "02:00"}],
+                    "sat": [],
+                    "sun": [],
+                },
+                location={"type": "Point", "coordinates": [28.86, 47.02]},
+            )
+        )
+    )
+    zone = ZoneInfo("Europe/Chisinau")
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 2, 22, 0, tzinfo=zone)  # Friday
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls.current
+            return cls.current.astimezone(tz)
+
+    with patch("app.business_docs.datetime", Clock):
+        friday = client.get("/api/v1/businesses/nearby?latitude=47.02&longitude=28.86", headers=HEADERS_A)
+        assert friday.status_code == 200, friday.text
+        night = friday.json()["items"][0]
+        assert night["open_now"] is True
+        assert night["closes_at"] == "02:00"
+
+        Clock.current = datetime(2026, 10, 3, 1, 0, tzinfo=zone)  # Saturday 01:00
+        still = client.get("/api/v1/businesses/nearby?latitude=47.02&longitude=28.86", headers=HEADERS_A).json()["items"][0]
+        assert still["open_now"] is True
+        assert still["closes_at"] == "02:00"
+
+        Clock.current = datetime(2026, 10, 3, 3, 0, tzinfo=zone)  # Saturday 03:00
+        closed = client.get("/api/v1/businesses/nearby?latitude=47.02&longitude=28.86", headers=HEADERS_A).json()["items"][0]
+        assert closed["open_now"] is False
 
 
 def test_special_dates_and_no_fixed_hours(client, mock_db):

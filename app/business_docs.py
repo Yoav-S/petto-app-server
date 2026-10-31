@@ -65,6 +65,7 @@ MAX_PHOTOS = 6
 ONBOARDING_STEPS = ("description", "logo", "phones", "email", "website", "instagram", "done")
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DAY_MINUTES = 24 * 60
 
 
 class HoursError(ValueError):
@@ -257,11 +258,59 @@ def minutes(value: object) -> int | None:
     if not isinstance(value, str):
         return None
     if value == "24:00":
-        return 24 * 60
+        return DAY_MINUTES
     if not _TIME.match(value):
         return None
     hour, minute = value.split(":")
     return int(hour) * 60 + int(minute)
+
+
+def _same_day_span(start: int, end: int) -> tuple[int, int]:
+    """Occupancy on the day the slot is listed. Overnight runs through midnight."""
+    return (start, end) if end > start else (start, DAY_MINUTES)
+
+
+def _morning_tail(start: int, end: int) -> tuple[int, int] | None:
+    """The next-day piece of an overnight slot, if any."""
+    if end < start and end > 0:
+        return (0, end)
+    return None
+
+
+def _spans_overlap(first: tuple[int, int], second: tuple[int, int]) -> bool:
+    return first[0] < second[1] and second[0] < first[1]
+
+
+def _day_spans(slots: list[dict]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for slot in slots:
+        start = minutes(slot["open"])
+        end = minutes(slot["close"])
+        if start is None or end is None or end == start:
+            continue
+        spans.append(_same_day_span(start, end))
+    return spans
+
+
+def _morning_tails(slots: list[dict]) -> list[tuple[int, int]]:
+    tails: list[tuple[int, int]] = []
+    for slot in slots:
+        start = minutes(slot["open"])
+        end = minutes(slot["close"])
+        if start is None or end is None:
+            continue
+        tail = _morning_tail(start, end)
+        if tail:
+            tails.append(tail)
+    return tails
+
+
+def _assert_no_spill_overlap(previous: list[dict], current: list[dict]) -> None:
+    tails = _morning_tails(previous)
+    for span in _day_spans(current):
+        for tail in tails:
+            if _spans_overlap(tail, span):
+                raise HoursError("hours")
 
 
 def _slot_list(raw: object) -> list[dict]:
@@ -271,7 +320,7 @@ def _slot_list(raw: object) -> list[dict]:
             continue
         start = minutes(slot.get("open"))
         end = minutes(slot.get("close"))
-        if start is None or end is None or start >= 24 * 60 or end <= start:
+        if start is None or end is None or start >= DAY_MINUTES or end == start:
             continue
         slots.append({"open": str(slot["open"]), "close": str(slot["close"])})
     slots.sort(key=lambda slot: slot["open"])
@@ -309,14 +358,13 @@ def _check_slots(slots: list) -> list[dict]:
     for slot in slots:
         start = minutes(slot.open)
         end = minutes(slot.close)
-        if start is None or end is None or start >= 24 * 60:
-            raise HoursError("hours")
-        if end <= start:
+        if start is None or end is None or start >= DAY_MINUTES or end == start:
             raise HoursError("hours")
         stored.append({"open": slot.open, "close": slot.close})
     stored.sort(key=lambda slot: slot["open"])
-    for first, second in zip(stored, stored[1:]):
-        if minutes(second["open"]) < minutes(first["close"]):
+    spans = _day_spans(stored)
+    for first, second in zip(spans, spans[1:]):
+        if _spans_overlap(first, second):
             raise HoursError("hours")
     return stored
 
@@ -336,6 +384,8 @@ def store_hours(hours: OpeningHours) -> dict:
     else:
         for day in DAYS:
             stored[day] = _check_slots(getattr(hours, day))
+        for index, day in enumerate(DAYS):
+            _assert_no_spill_overlap(stored[DAYS[index - 1]], stored[day])
     special: list[dict] = []
     seen: set[str] = set()
     for item in hours.special_dates:
@@ -352,6 +402,18 @@ def store_hours(hours: OpeningHours) -> dict:
         special.append({"date": item.date, "closed": item.closed, "slots": slots})
     special.sort(key=lambda item: item["date"])
     stored["special_dates"] = special
+
+    def hours_on(iso: str) -> list[dict]:
+        override = next((row for row in special if row["date"] == iso), None)
+        if override is not None:
+            return [] if override["closed"] else override["slots"]
+        return stored[DAYS[date.fromisoformat(iso).weekday()]]
+
+    for item in special:
+        day = date.fromisoformat(item.date)
+        current = [] if item["closed"] else item["slots"]
+        _assert_no_spill_overlap(hours_on((day - timedelta(days=1)).isoformat()), current)
+        _assert_no_spill_overlap(current, hours_on((day + timedelta(days=1)).isoformat()))
     return stored
 
 
@@ -365,7 +427,8 @@ def hours_complete(hours: dict) -> bool:
 
 
 def _clock(total: int) -> str:
-    return f"{total // 60:02d}:{total % 60:02d}"
+    shown = total % DAY_MINUTES if total > DAY_MINUTES else total
+    return f"{shown // 60:02d}:{shown % 60:02d}"
 
 
 def schedule(hours: dict, tz_name: str | None) -> dict:
@@ -396,17 +459,23 @@ def schedule(hours: dict, tz_name: str | None) -> dict:
         for slot in slots:
             start = minutes(slot.get("open"))
             end = minutes(slot.get("close"))
-            if start is None or end is None or end <= start:
+            if start is None or end is None or end == start:
                 continue
-            result.append((start, end))
+            if end > start:
+                result.append((start, end))
+            else:
+                result.append((start, end + DAY_MINUTES))
         return result
 
-    def slots_for(offset: int) -> list[tuple[int, int]]:
+    def raw_slots(offset: int) -> list:
         day = (now.date() + timedelta(days=offset)).isoformat()
         override = special.get(day)
         if override is not None:
-            return [] if override.get("closed") else parsed(override.get("slots") or [])
-        return parsed(hours.get(DAYS[(today + offset) % 7]) or [])
+            return [] if override.get("closed") else (override.get("slots") or [])
+        return hours.get(DAYS[(today + offset) % 7]) or []
+
+    def slots_for(offset: int) -> list[tuple[int, int]]:
+        return _morning_tails(raw_slots(offset - 1)) + parsed(raw_slots(offset))
 
     def full_day(index: int) -> bool:
         return any(start == 0 and end >= 24 * 60 - 1 for start, end in parsed(hours.get(DAYS[index]) or []))
