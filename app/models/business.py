@@ -393,6 +393,17 @@ class InvitationOut(BaseModel):
     role: MemberRole
     status: Literal["pending", "approved", "declined"]
     location_id: Optional[str] = None
+    location_address: Optional[str] = None
+
+
+class TeamMemberOut(BaseModel):
+    id: str
+    business_id: str
+    user_id: Optional[str] = None
+    email: Optional[str] = None
+    role: MemberRole
+    location_id: Optional[str] = None
+    location_address: Optional[str] = None
 
 
 class BusinessOut(BaseModel):
@@ -429,6 +440,7 @@ class BusinessOut(BaseModel):
     submitted_at: Optional[datetime] = None
     onboarding_step: OnboardingStep = "done"
     invitations: list[InvitationOut] = Field(default_factory=list)
+    members: list[TeamMemberOut] = Field(default_factory=list)
     locations: list[LocationOut] = Field(default_factory=list)
 
 

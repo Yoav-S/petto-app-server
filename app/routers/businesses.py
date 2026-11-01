@@ -63,6 +63,7 @@ from app.models.business import (
     InvitationOut,
     ListingVisibility,
     LocationOut,
+    TeamMemberOut,
     NameCheck,
     NoticeSeen,
     OwnerInvite,
@@ -150,7 +151,7 @@ async def _require_brand_owner(db: AsyncIOMotorDatabase, business: dict, current
 # ---------------------------------------------------------------------------
 
 
-def _invite_out(doc: dict, business_name: str = "") -> InvitationOut:
+def _invite_out(doc: dict, business_name: str = "", location_address: str | None = None) -> InvitationOut:
     data = doc_to_dict(doc)
     return InvitationOut(
         id=data["id"],
@@ -160,7 +161,28 @@ def _invite_out(doc: dict, business_name: str = "") -> InvitationOut:
         role=data.get("role") if data.get("role") in _ROLES else "worker",
         status=data.get("status") if data.get("status") in {"pending", "approved", "declined"} else "pending",
         location_id=docs.optional_text(data.get("location_id")),
+        location_address=location_address,
     )
+
+
+def _member_out(doc: dict, location_address: str | None = None) -> TeamMemberOut:
+    data = doc_to_dict(doc)
+    return TeamMemberOut(
+        id=data["id"],
+        business_id=str(data.get("business_id") or ""),
+        user_id=docs.optional_text(data.get("user_id")),
+        email=docs.optional_text(data.get("email")),
+        role=data.get("role") if data.get("role") in _ROLES else "worker",
+        location_id=docs.optional_text(data.get("location_id")),
+        location_address=location_address,
+    )
+
+
+def _apply_location_labels(invitations: list[InvitationOut], locations: list[LocationOut]) -> None:
+    labels = {item.id: item.address for item in locations}
+    for invitation in invitations:
+        if invitation.location_id:
+            invitation.location_address = labels.get(invitation.location_id)
 
 
 async def _load_invitations(db: AsyncIOMotorDatabase, business_ids: list[str]) -> dict[str, list[InvitationOut]]:
@@ -171,6 +193,23 @@ async def _load_invitations(db: AsyncIOMotorDatabase, business_ids: list[str]) -
     for row in rows:
         grouped.setdefault(str(row.get("business_id")), []).append(_invite_out(row))
     return grouped
+
+
+async def _load_members(
+    db: AsyncIOMotorDatabase, business_id: str, locations: list[LocationOut]
+) -> list[TeamMemberOut]:
+    rows = await db.business_members.find({"business_id": business_id}).to_list(None)
+    labels = {item.id: item.address for item in locations}
+    return [_member_out(row, labels.get(docs.optional_text(row.get("location_id")))) for row in rows]
+
+
+async def _invite_with_branch(db: AsyncIOMotorDatabase, row: dict, business_name: str = "") -> InvitationOut:
+    out = _invite_out(row, business_name)
+    if out.location_id and ObjectId.is_valid(out.location_id):
+        branch = await db.business_locations.find_one({"_id": ObjectId(out.location_id)}, {"address": 1})
+        if branch:
+            out.location_address = docs.text(branch.get("address"))
+    return out
 
 
 async def _owner_business_ids(db: AsyncIOMotorDatabase, business_ids: list[str]) -> set[str]:
@@ -188,6 +227,8 @@ async def _full_out(db: AsyncIOMotorDatabase, business: dict) -> BusinessOut:
     invitations = await _load_invitations(db, [out.id])
     owner_ids = await _owner_business_ids(db, [out.id])
     out.invitations = invitations.get(out.id, [])
+    _apply_location_labels(out.invitations, out.locations)
+    out.members = await _load_members(db, out.id, out.locations)
     if out.id in owner_ids:
         out.owned = True
     image = docs.profile_image(business, rows)
@@ -476,6 +517,10 @@ async def my_business(
         listed = await _full_out(db, doc)
         if role != "owner" and location_id:
             listed.locations = [item for item in listed.locations if item.id == location_id]
+            listed.members = [
+                item for item in listed.members if item.role == "owner" or item.location_id == location_id
+            ]
+            listed.invitations = [item for item in listed.invitations if item.location_id == location_id]
         entries.append(BusinessMembership(business=listed, role=role, location_id=location_id))
     entries.sort(key=lambda item: (item.business.created_at or datetime.min.replace(tzinfo=timezone.utc)))
     first = entries[0].business if entries else None
@@ -488,7 +533,7 @@ async def my_business(
             invited = await db.businesses.find_one({"_id": ObjectId(row["business_id"])})
             if invited:
                 business_name = invited.get("name") or ""
-        pending.append(_invite_out(row, business_name))
+        pending.append(await _invite_with_branch(db, row, business_name))
     person = await db.users.find_one({"firebase_uid": uid}) or {}
     locale = docs.text(person.get("locale")).lower()[:2]
     if first is not None:
@@ -2213,26 +2258,46 @@ async def owner_invite_member(
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Invite an owner for every branch, or a store manager, lead, or staff for one branch."""
+    """Business owners and admins invite a branch owner. Later roles stay available on the API."""
     business = await _business_or_404(db, business_id)
     uid = current_user["uid"]
     is_owner = await _brand_owner(db, business, current_user)
     location_id = (body.location_id or "").strip() or None
     reports_to = (body.reports_to or "").strip() or None
+    branch: dict | None = None
     if body.role == "owner":
         if not is_owner:
             raise_api_error(403, ErrorCode.UNAUTHORIZED)
         location_id = None
         reports_to = None
+    elif body.role == "branch_owner":
+        if not is_owner:
+            raise_api_error(403, ErrorCode.UNAUTHORIZED)
+        if not location_id:
+            raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
+        branch = await _branch_or_404(db, business, location_id)
+        taken = await db.business_members.find_one(
+            {"business_id": str(business["_id"]), "role": "branch_owner", "location_id": location_id}
+        )
+        if taken:
+            raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
+        pending = await db.business_invitations.find_one(
+            {
+                "business_id": str(business["_id"]),
+                "role": "branch_owner",
+                "location_id": location_id,
+                "status": "pending",
+            }
+        )
+        if pending:
+            raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
     else:
         if not location_id:
             rows = await docs.ensure_branches(db, business)
             location_id = str(rows[0]["_id"]) if rows else None
-        if not location_id or not ObjectId.is_valid(location_id):
+        if not location_id:
             raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
-        branch = await db.business_locations.find_one({"_id": ObjectId(location_id), "business_id": str(business["_id"])})
-        if not branch:
-            raise_api_error(404, ErrorCode.NOT_FOUND)
+        branch = await _branch_or_404(db, business, location_id)
         if docs.branch_status(branch) != "published":
             raise_api_error(400, ErrorCode.BUSINESS_INCOMPLETE)
         if not is_owner:
@@ -2240,7 +2305,7 @@ async def owner_invite_member(
                 {"business_id": str(business["_id"]), "user_id": uid, "location_id": location_id}
             ).to_list(None)
             roles = {row.get("role") for row in mine}
-            if body.role == "branch_owner" or not roles.intersection({"branch_owner", "lead"}):
+            if not roles.intersection({"branch_owner", "lead"}):
                 raise_api_error(403, ErrorCode.UNAUTHORIZED)
             if "lead" in roles and "branch_owner" not in roles:
                 reports_to = reports_to or uid
@@ -2248,7 +2313,62 @@ async def owner_invite_member(
         db, business, body.email, body.role,
         (current_user.get("email") or "").strip().lower(), location_id, reports_to,
     )
-    return _invite_out(invite, business.get("name") or "")
+    return _invite_out(invite, business.get("name") or "", docs.text(branch.get("address")) if branch else None)
+
+
+@router.delete("/businesses/{business_id}/invitations/{invitation_id}", status_code=204)
+async def cancel_invitation(
+    business_id: str,
+    invitation_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Business owners and admins withdraw a pending invite."""
+    business = await _business_or_404(db, business_id)
+    await _require_brand_owner(db, business, current_user)
+    if not ObjectId.is_valid(invitation_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    invite = await db.business_invitations.find_one(
+        {"_id": ObjectId(invitation_id), "business_id": str(business["_id"])}
+    )
+    if not invite:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    if invite.get("status") != "pending":
+        raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
+    await db.business_invitations.delete_one({"_id": invite["_id"]})
+
+
+@router.delete("/businesses/{business_id}/members/{member_id}", status_code=204)
+async def remove_member(
+    business_id: str,
+    member_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Fire a branch owner. The business owner manages that branch again until a new invite."""
+    business = await _business_or_404(db, business_id)
+    await _require_brand_owner(db, business, current_user)
+    if not ObjectId.is_valid(member_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    member = await db.business_members.find_one({"_id": ObjectId(member_id), "business_id": str(business["_id"])})
+    if not member:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    if member.get("role") == "owner":
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+    await db.business_members.delete_one({"_id": member["_id"]})
+    location_id = docs.optional_text(member.get("location_id"))
+    branch = None
+    if location_id and ObjectId.is_valid(location_id):
+        branch = await db.business_locations.find_one({"_id": ObjectId(location_id), "business_id": str(business["_id"])})
+    await docs.record_event(
+        db,
+        business=business,
+        kind="member_removed",
+        audience="admins",
+        actor=_actor(current_user),
+        branch=branch,
+        message=docs.optional_text(member.get("email")),
+    )
 
 
 @router.post("/businesses/invitations/{invitation_id}/approve", response_model=InvitationOut)
@@ -2303,6 +2423,17 @@ async def _respond_invitation(invitation_id: str, current_user: dict, db: AsyncI
                 await db.businesses.update_one({"_id": business["_id"]}, {"$set": update})
         else:
             location_id = docs.optional_text(invite.get("location_id"))
+            if role == "branch_owner" and location_id:
+                taken = await db.business_members.find_one(
+                    {
+                        "business_id": str(business["_id"]),
+                        "role": "branch_owner",
+                        "location_id": location_id,
+                        "user_id": {"$ne": uid},
+                    }
+                )
+                if taken:
+                    raise_api_error(400, ErrorCode.ALREADY_RESOLVED)
             await db.business_members.update_one(
                 {"business_id": str(business["_id"]), "user_id": uid, "location_id": location_id},
                 {

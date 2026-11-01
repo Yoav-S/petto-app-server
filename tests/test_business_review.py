@@ -1062,3 +1062,98 @@ def test_admin_can_list_reviews_for_unpublished_business(client, mock_db):
         assert listed.json()[0]["rating"] == 4
         denied = client.get(f"/api/v1/admin/businesses/{doc['_id']}/reviews", headers=HEADERS_A)
         assert denied.status_code == 403
+
+
+def test_branch_owner_is_invited_and_removed_by_business_owner(client, mock_db):
+    created = client.post("/api/v1/businesses", json=_details(), headers=HEADERS_A)
+    assert created.status_code == 201, created.text
+    business_id = created.json()["id"]
+    branch = client.post(f"/api/v1/businesses/{business_id}/locations", json=_branch(), headers=HEADERS_A)
+    assert branch.status_code == 201, branch.text
+    branch_id = branch.json()["id"]
+    asyncio.run(mock_db.business_locations.update_one({"_id": ObjectId(branch_id)}, {"$set": {"status": "published"}}))
+    asyncio.run(mock_db.businesses.update_one({"_id": ObjectId(business_id)}, {"$set": {"status": "published"}}))
+
+    missing = client.post(
+        f"/api/v1/businesses/{business_id}/invitations",
+        json={"email": "uid_user_b@test.com", "role": "branch_owner"},
+        headers=HEADERS_A,
+    )
+    assert missing.status_code == 400
+
+    invited = client.post(
+        f"/api/v1/businesses/{business_id}/invitations",
+        json={"email": "uid_user_b@test.com", "role": "branch_owner", "location_id": branch_id},
+        headers=HEADERS_A,
+    )
+    assert invited.status_code == 201, invited.text
+    assert invited.json()["location_id"] == branch_id
+    assert invited.json()["location_address"]
+    invitation_id = invited.json()["id"]
+
+    duplicate = client.post(
+        f"/api/v1/businesses/{business_id}/invitations",
+        json={"email": "other@example.com", "role": "branch_owner", "location_id": branch_id},
+        headers=HEADERS_A,
+    )
+    assert duplicate.status_code == 400
+
+    cancelled = client.delete(f"/api/v1/businesses/{business_id}/invitations/{invitation_id}", headers=HEADERS_A)
+    assert cancelled.status_code == 204
+
+    invited = client.post(
+        f"/api/v1/businesses/{business_id}/invitations",
+        json={"email": "uid_user_b@test.com", "role": "branch_owner", "location_id": branch_id},
+        headers=HEADERS_A,
+    )
+    assert invited.status_code == 201, invited.text
+    invitation_id = invited.json()["id"]
+
+    approved = client.post(f"/api/v1/businesses/invitations/{invitation_id}/approve", headers=HEADERS_B)
+    assert approved.status_code == 200, approved.text
+
+    mine_b = client.get("/api/v1/businesses/mine", headers=HEADERS_B).json()
+    assert mine_b["role"] == "branch_owner"
+    assert mine_b["businesses"][0]["location_id"] == branch_id
+    assert [item["id"] for item in mine_b["business"]["locations"]] == [branch_id]
+
+    denied = client.post(
+        f"/api/v1/businesses/{business_id}/invitations",
+        json={"email": "other@example.com", "role": "branch_owner", "location_id": branch_id},
+        headers=HEADERS_B,
+    )
+    assert denied.status_code == 403
+
+    mine_a = client.get("/api/v1/businesses/mine", headers=HEADERS_A).json()
+    members = mine_a["business"]["members"]
+    owner = next(item for item in members if item["role"] == "owner")
+    manager = next(item for item in members if item["role"] == "branch_owner")
+    assert manager["location_id"] == branch_id
+    assert manager["email"] == "uid_user_b@test.com"
+
+    cannot_fire_owner = client.delete(f"/api/v1/businesses/{business_id}/members/{owner['id']}", headers=HEADERS_A)
+    assert cannot_fire_owner.status_code == 403
+    cannot_self_fire = client.delete(f"/api/v1/businesses/{business_id}/members/{manager['id']}", headers=HEADERS_B)
+    assert cannot_self_fire.status_code == 403
+
+    fired = client.delete(f"/api/v1/businesses/{business_id}/members/{manager['id']}", headers=HEADERS_A)
+    assert fired.status_code == 204
+
+    after = client.get("/api/v1/businesses/mine", headers=HEADERS_A).json()
+    assert all(item["role"] != "branch_owner" for item in after["business"]["members"])
+    gone = client.get("/api/v1/businesses/mine", headers=HEADERS_B).json()
+    assert gone["business"] is None
+
+    with ADMIN:
+        again = client.post(
+            f"/api/v1/businesses/{business_id}/invitations",
+            json={"email": "new.manager@example.com", "role": "branch_owner", "location_id": branch_id},
+            headers=HEADERS_B,
+        )
+        assert again.status_code == 201, again.text
+        detail = client.get(f"/api/v1/admin/businesses/{business_id}", headers=HEADERS_B).json()
+        assert any(
+            item["role"] == "branch_owner" and item["status"] == "pending" and item["location_id"] == branch_id
+            for item in detail["invitations"]
+        )
+        assert all(item["role"] != "branch_owner" for item in detail["members"])
