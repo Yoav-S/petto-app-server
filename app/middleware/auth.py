@@ -16,6 +16,7 @@ from app.core.errors import ErrorCode, raise_api_error
 from app.core.firebase import verify_firebase_token
 
 _bearer = HTTPBearer()
+_optional_bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
@@ -31,3 +32,20 @@ async def get_current_user(
         }
     except Exception:
         raise_api_error(401, ErrorCode.INVALID_TOKEN)
+
+
+async def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
+) -> dict | None:
+    """Same as get_current_user, but missing or invalid tokens become anonymous."""
+    if credentials is None:
+        return None
+    try:
+        decoded = verify_firebase_token(credentials.credentials)
+        return {
+            "uid": decoded["uid"],
+            "email": decoded.get("email", ""),
+            "token": decoded,
+        }
+    except Exception:
+        return None

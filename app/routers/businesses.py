@@ -18,10 +18,11 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
+from app import analytics as listing_analytics
 from app import business_docs as docs
 from app.business_mail import note_lines, send_owner_update
 from app.business_names import business_name_key
@@ -39,11 +40,15 @@ from app.core.utils import doc_to_dict, is_valid_object_id
 from app.country import country_code
 from app.geo import timezone_at
 from app.images import identify_image
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, get_optional_user
 from app.models.business import (
     CATEGORIES,
     AdminApprove,
     AdminCreate,
+    AnalyticsDirectoryItem,
+    AnalyticsDirectoryLocation,
+    AnalyticsEventIn,
+    BranchAnalytics,
     BranchApprove,
     BranchReject,
     BranchVisibility,
@@ -492,7 +497,7 @@ async def my_business(
     memberships = await db.business_members.find({"user_id": uid}).to_list(None)
     owned_docs = await db.businesses.find({"owner_uid": uid}).to_list(None)
     by_id: dict[str, dict] = {str(doc["_id"]): doc for doc in owned_docs}
-    access: dict[str, tuple[str, str | None]] = {business_id: ("owner", None) for business_id in by_id}
+    access: dict[str, tuple[str, list[str]]] = {business_id: ("owner", []) for business_id in by_id}
     for member in memberships:
         business_id = str(member.get("business_id") or "")
         if not ObjectId.is_valid(business_id):
@@ -508,20 +513,34 @@ async def my_business(
         if current and current[0] == "owner":
             continue
         if role == "owner":
-            access[business_id] = ("owner", None)
+            access[business_id] = ("owner", [])
+        elif role == "branch_owner" and location_id:
+            if current and current[0] == "branch_owner":
+                if location_id not in current[1]:
+                    current[1].append(location_id)
+            else:
+                access[business_id] = ("branch_owner", [location_id])
         elif business_id not in access:
-            access[business_id] = (role, location_id)
+            access[business_id] = (role, [location_id] if location_id else [])
     entries: list[BusinessMembership] = []
     for business_id, doc in by_id.items():
-        role, location_id = access.get(business_id, ("owner", None))
+        role, location_ids = access.get(business_id, ("owner", []))
         listed = await _full_out(db, doc)
-        if role != "owner" and location_id:
-            listed.locations = [item for item in listed.locations if item.id == location_id]
+        if role != "owner" and location_ids:
+            allowed = set(location_ids)
+            listed.locations = [item for item in listed.locations if item.id in allowed]
             listed.members = [
-                item for item in listed.members if item.role == "owner" or item.location_id == location_id
+                item for item in listed.members if item.role == "owner" or item.location_id in allowed
             ]
-            listed.invitations = [item for item in listed.invitations if item.location_id == location_id]
-        entries.append(BusinessMembership(business=listed, role=role, location_id=location_id))
+            listed.invitations = [item for item in listed.invitations if item.location_id in allowed]
+        entries.append(
+            BusinessMembership(
+                business=listed,
+                role=role,
+                location_id=location_ids[0] if location_ids else None,
+                location_ids=location_ids,
+            )
+        )
     entries.sort(key=lambda item: (item.business.created_at or datetime.min.replace(tzinfo=timezone.utc)))
     first = entries[0].business if entries else None
     first_role = entries[0].role if entries else None
@@ -838,6 +857,73 @@ async def business_place(
         city=closest.city if closest and closest.city else docs.text(doc.get("city")),
         **docs.public_schedule(hours, zone),
     )
+
+
+# ---------------------------------------------------------------------------
+# Listing analytics (anonymous counts; never shown to pet owners)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/businesses/{business_id}/analytics/events", status_code=204)
+async def record_place_analytics(
+    business_id: str,
+    body: AnalyticsEventIn,
+    request: Request,
+    current_user: dict | None = Depends(get_optional_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Count a page view, call, or directions tap. Staff of this listing are ignored."""
+    if not ObjectId.is_valid(business_id):
+        return
+    business = await db.businesses.find_one({"_id": ObjectId(business_id)})
+    if not business:
+        return
+    await listing_analytics.record_event(
+        db, request, business, body.location_id, body.action, current_user
+    )
+
+
+@router.get("/businesses/{business_id}/analytics", response_model=BranchAnalytics)
+async def get_place_analytics(
+    business_id: str,
+    location_id: str = Query(..., min_length=1),
+    days: int = Query(30, ge=1, le=90),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """One branch at a time. Business owners and admins can pick any branch; branch owners only theirs."""
+    business = await _business_or_404(db, business_id)
+    branch = await listing_analytics.require_branch_analytics(db, business, current_user, location_id)
+    return await listing_analytics.read_branch(db, business, branch, days)
+
+
+@router.get("/admin/analytics/directory", response_model=list[AnalyticsDirectoryItem])
+async def admin_analytics_directory(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Business + branch names for the admin analytics picker. Admins only."""
+    _require_admin(current_user)
+    rows = await db.businesses.find({}).sort("name", 1).to_list(None)
+    out: list[AnalyticsDirectoryItem] = []
+    for doc in rows:
+        branches = await docs.list_branches(db, str(doc["_id"]))
+        out.append(
+            AnalyticsDirectoryItem(
+                id=str(doc["_id"]),
+                name=docs.text(doc.get("name")),
+                status=docs.business_status(doc),
+                locations=[
+                    AnalyticsDirectoryLocation(
+                        id=str(branch["_id"]),
+                        address=docs.text(branch.get("address")),
+                        city=docs.text(branch.get("city")),
+                    )
+                    for branch in branches
+                ],
+            )
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------

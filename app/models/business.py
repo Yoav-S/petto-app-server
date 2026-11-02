@@ -627,12 +627,73 @@ class BusinessReview(BaseModel):
     updated_at: datetime
 
 
+class AnalyticsEventIn(BaseModel):
+    location_id: str = Field(min_length=1, max_length=64)
+    action: Literal["view", "call", "directions"]
+
+
+class AnalyticsTotals(BaseModel):
+    views: int = 0
+    unique_visitors: int = 0
+    calls: int = 0
+    directions: int = 0
+
+
+class AnalyticsDay(BaseModel):
+    date: str
+    views: int = 0
+    unique_visitors: int = 0
+    calls: int = 0
+    directions: int = 0
+
+
+class AnalyticsHour(BaseModel):
+    hour: int = Field(ge=0, le=23)
+    views: int = 0
+    unique_visitors: int = 0
+    calls: int = 0
+    directions: int = 0
+
+
+class AnalyticsBusyHour(BaseModel):
+    hour: int = Field(ge=0, le=23)
+    views: int
+    share: float = 0
+
+
+class BranchAnalytics(BaseModel):
+    business_id: str
+    location_id: str
+    address: str = ""
+    city: str = ""
+    timezone: str
+    days: int
+    totals: AnalyticsTotals
+    by_day: list[AnalyticsDay] = Field(default_factory=list)
+    by_hour: list[AnalyticsHour] = Field(default_factory=list)
+    busy_hours: list[AnalyticsBusyHour] = Field(default_factory=list)
+
+
+class AnalyticsDirectoryLocation(BaseModel):
+    id: str
+    address: str = ""
+    city: str = ""
+
+
+class AnalyticsDirectoryItem(BaseModel):
+    id: str
+    name: str
+    status: str
+    locations: list[AnalyticsDirectoryLocation] = Field(default_factory=list)
+
+
 class BusinessMembership(BaseModel):
     """One business this account can open. An owner has no location_id: every branch."""
 
     business: BusinessOut
     role: MemberRole
     location_id: Optional[str] = None
+    location_ids: list[str] = Field(default_factory=list)
 
 
 class BusinessSession(BaseModel):

@@ -89,6 +89,17 @@ async def connect_to_db() -> None:
         unique=True,
     )
     await _db.business_reviews.create_index("business_id")
+    await _db.analytics_hours.create_index(
+        [("location_id", 1), ("day", 1), ("hour", 1)],
+        unique=True,
+    )
+    await _db.analytics_hours.create_index("business_id")
+    await _db.analytics_visitors.create_index(
+        [("location_id", 1), ("day", 1), ("visitor", 1)],
+        unique=True,
+    )
+    await _db.analytics_dedupe.create_index("key", unique=True)
+    await _db.analytics_dedupe.create_index("expires_at", expireAfterSeconds=0)
 
 
 async def _ensure_reminder_series_date_index(db) -> None:
