@@ -84,8 +84,11 @@ def test_owner_reads_each_branch_and_staff_views_are_ignored(client, mock_db):
     assert ignored.status_code == 204
     counted = _hit(client, business_id, loc_a, ua="visitor-one")
     assert counted.status_code == 204
+    _hit(client, business_id, loc_a, action="impression", ua="visitor-one")
     _hit(client, business_id, loc_a, action="call", ua="visitor-one")
     _hit(client, business_id, loc_a, action="directions", ua="visitor-one")
+    _hit(client, business_id, loc_a, action="website", ua="visitor-one")
+    _hit(client, business_id, loc_a, action="instagram", ua="visitor-one")
     _hit(client, business_id, loc_b, ua="visitor-two")
 
     same_window = _hit(client, business_id, loc_a, ua="visitor-one")
@@ -99,10 +102,13 @@ def test_owner_reads_each_branch_and_staff_views_are_ignored(client, mock_db):
     assert first.status_code == 200, first.text
     body = first.json()
     assert body["location_id"] == loc_a
+    assert body["totals"]["impressions"] == 1
     assert body["totals"]["views"] == 1
     assert body["totals"]["unique_visitors"] == 1
     assert body["totals"]["calls"] == 1
     assert body["totals"]["directions"] == 1
+    assert body["totals"]["website"] == 1
+    assert body["totals"]["instagram"] == 1
     assert body["busy_hours"][0]["hour"] >= 0
     assert len(body["by_day"]) == 30
     assert len(body["by_hour"]) == 24
@@ -203,3 +209,100 @@ def test_admin_reads_any_branch(client, mock_db):
             params={"location_id": loc_a},
         )
         assert other.status_code == 200
+
+
+def test_owner_reads_business_rollup_and_unique_visitors_across_branches(client, mock_db):
+    business_id, loc_a, loc_b = _seed(mock_db)
+    _hit(client, business_id, loc_a, ua="same-person")
+    _hit(client, business_id, loc_b, ua="same-person")
+    _hit(client, business_id, loc_a, action="call", ua="same-person")
+    _hit(client, business_id, loc_b, action="directions", ua="other-person")
+
+    rolled = client.get(
+        f"/api/v1/businesses/{business_id}/analytics",
+        headers=HEADERS_A,
+        params={"days": 30},
+    )
+    assert rolled.status_code == 200, rolled.text
+    body = rolled.json()
+    assert body["scope"] == "business"
+    assert body["location_id"] is None
+    assert body["totals"]["views"] == 2
+    assert body["totals"]["unique_visitors"] == 1
+    assert body["totals"]["calls"] == 1
+    assert body["totals"]["directions"] == 1
+    by_id = {row["id"]: row["totals"] for row in body["branches"]}
+    assert by_id[loc_a]["views"] == 1
+    assert by_id[loc_a]["calls"] == 1
+    assert by_id[loc_b]["views"] == 1
+    assert by_id[loc_b]["directions"] == 1
+
+
+def test_branch_owner_business_rollup_is_only_managed_branches(client, mock_db):
+    business_id, loc_a, loc_b = _seed(mock_db)
+    _hit(client, business_id, loc_a, ua="visitor-one")
+    _hit(client, business_id, loc_b, ua="visitor-two")
+
+    rolled = client.get(
+        f"/api/v1/businesses/{business_id}/analytics",
+        headers=HEADERS_B,
+        params={"days": 30},
+    )
+    assert rolled.status_code == 200, rolled.text
+    body = rolled.json()
+    assert body["scope"] == "business"
+    assert body["totals"]["views"] == 1
+    assert [row["id"] for row in body["branches"]] == [loc_a]
+
+
+def test_admin_platform_overview_sums_every_listing(client, mock_db):
+    first_id, loc_a, _loc_b = _seed(mock_db)
+
+    async def extra():
+        other = await mock_db.businesses.insert_one(
+            {
+                "name": "Paw Shop",
+                "status": "published",
+                "visible": True,
+                "owner_uid": USER_A_UID,
+                "timezone": "Europe/Chisinau",
+                "created_at": datetime.now(timezone.utc),
+            }
+        )
+        other_id = str(other.inserted_id)
+        loc = await mock_db.business_locations.insert_one(
+            {
+                "business_id": other_id,
+                "address": "Bd. Dacia 1",
+                "city": "Chișinău",
+                "timezone": "Europe/Chisinau",
+                "status": "published",
+                "visible": True,
+                "is_main": True,
+            }
+        )
+        return other_id, str(loc.inserted_id)
+
+    other_id, loc_c = asyncio.run(extra())
+    _hit(client, first_id, loc_a, ua="visitor-one")
+    _hit(client, first_id, loc_a, action="call", ua="visitor-one")
+    _hit(client, other_id, loc_c, ua="visitor-two")
+
+    denied = client.get("/api/v1/admin/analytics/overview", headers=HEADERS_A)
+    assert denied.status_code == 403
+
+    with ADMIN:
+        overview = client.get(
+            "/api/v1/admin/analytics/overview",
+            headers=HEADERS_B,
+            params={"days": 30},
+        )
+        assert overview.status_code == 200, overview.text
+        body = overview.json()
+        assert body["scope"] == "platform"
+        assert body["totals"]["views"] == 2
+        assert body["totals"]["calls"] == 1
+        assert body["totals"]["unique_visitors"] == 2
+        by_id = {row["id"]: row["totals"] for row in body["businesses"]}
+        assert by_id[first_id]["calls"] == 1
+        assert by_id[other_id]["views"] == 1

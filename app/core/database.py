@@ -98,6 +98,7 @@ async def connect_to_db() -> None:
         [("location_id", 1), ("day", 1), ("visitor", 1)],
         unique=True,
     )
+    await _db.analytics_visitors.create_index("business_id")
     await _db.analytics_dedupe.create_index("key", unique=True)
     await _db.analytics_dedupe.create_index("expires_at", expireAfterSeconds=0)
 

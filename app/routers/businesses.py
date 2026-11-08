@@ -48,7 +48,7 @@ from app.models.business import (
     AnalyticsDirectoryItem,
     AnalyticsDirectoryLocation,
     AnalyticsEventIn,
-    BranchAnalytics,
+    ListingAnalytics,
     BranchApprove,
     BranchReject,
     BranchVisibility,
@@ -872,7 +872,7 @@ async def record_place_analytics(
     current_user: dict | None = Depends(get_optional_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Count a page view, call, or directions tap. Staff of this listing are ignored."""
+    """Count a list impression, page view, or outbound tap. Staff of this listing are ignored."""
     if not ObjectId.is_valid(business_id):
         return
     business = await db.businesses.find_one({"_id": ObjectId(business_id)})
@@ -883,18 +883,34 @@ async def record_place_analytics(
     )
 
 
-@router.get("/businesses/{business_id}/analytics", response_model=BranchAnalytics)
+@router.get("/businesses/{business_id}/analytics", response_model=ListingAnalytics)
 async def get_place_analytics(
     business_id: str,
-    location_id: str = Query(..., min_length=1),
+    location_id: str | None = Query(None, min_length=1),
     days: int = Query(30, ge=1, le=90),
     current_user: dict = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """One branch at a time. Business owners and admins can pick any branch; branch owners only theirs."""
+    """One branch, or every branch this user may see (omit location_id)."""
     business = await _business_or_404(db, business_id)
-    branch = await listing_analytics.require_branch_analytics(db, business, current_user, location_id)
-    return await listing_analytics.read_branch(db, business, branch, days)
+    if location_id:
+        branch = await listing_analytics.require_branch_analytics(
+            db, business, current_user, location_id
+        )
+        return await listing_analytics.read_branch(db, business, branch, days)
+    branches = await listing_analytics.require_business_analytics(db, business, current_user)
+    return await listing_analytics.read_business(db, business, branches, days)
+
+
+@router.get("/admin/analytics/overview", response_model=ListingAnalytics)
+async def admin_analytics_overview(
+    days: int = Query(30, ge=1, le=90),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """App-wide totals plus per-business and per-branch rows. Admins only."""
+    _require_admin(current_user)
+    return await listing_analytics.read_platform(db, days)
 
 
 @router.get("/admin/analytics/directory", response_model=list[AnalyticsDirectoryItem])

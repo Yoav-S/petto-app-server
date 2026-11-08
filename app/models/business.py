@@ -627,32 +627,44 @@ class BusinessReview(BaseModel):
     updated_at: datetime
 
 
+AnalyticsAction = Literal["impression", "view", "call", "directions", "website", "instagram"]
+
+
 class AnalyticsEventIn(BaseModel):
     location_id: str = Field(min_length=1, max_length=64)
-    action: Literal["view", "call", "directions"]
+    action: AnalyticsAction
 
 
 class AnalyticsTotals(BaseModel):
+    impressions: int = 0
     views: int = 0
     unique_visitors: int = 0
     calls: int = 0
     directions: int = 0
+    website: int = 0
+    instagram: int = 0
 
 
 class AnalyticsDay(BaseModel):
     date: str
+    impressions: int = 0
     views: int = 0
     unique_visitors: int = 0
     calls: int = 0
     directions: int = 0
+    website: int = 0
+    instagram: int = 0
 
 
 class AnalyticsHour(BaseModel):
     hour: int = Field(ge=0, le=23)
+    impressions: int = 0
     views: int = 0
     unique_visitors: int = 0
     calls: int = 0
     directions: int = 0
+    website: int = 0
+    instagram: int = 0
 
 
 class AnalyticsBusyHour(BaseModel):
@@ -661,9 +673,23 @@ class AnalyticsBusyHour(BaseModel):
     share: float = 0
 
 
-class BranchAnalytics(BaseModel):
-    business_id: str
-    location_id: str
+class AnalyticsSlice(BaseModel):
+    """One row in a rollup table: a branch under a business, or a business under the platform."""
+
+    id: str
+    name: str = ""
+    address: str = ""
+    city: str = ""
+    totals: AnalyticsTotals = Field(default_factory=AnalyticsTotals)
+
+
+class ListingAnalytics(BaseModel):
+    """Branch, business (all allowed branches), or platform (all listings) totals."""
+
+    scope: Literal["branch", "business", "platform"] = "branch"
+    business_id: Optional[str] = None
+    location_id: Optional[str] = None
+    name: str = ""
     address: str = ""
     city: str = ""
     timezone: str
@@ -672,6 +698,12 @@ class BranchAnalytics(BaseModel):
     by_day: list[AnalyticsDay] = Field(default_factory=list)
     by_hour: list[AnalyticsHour] = Field(default_factory=list)
     busy_hours: list[AnalyticsBusyHour] = Field(default_factory=list)
+    branches: list[AnalyticsSlice] = Field(default_factory=list)
+    businesses: list[AnalyticsSlice] = Field(default_factory=list)
+
+
+# Older name — same payload.
+BranchAnalytics = ListingAnalytics
 
 
 class AnalyticsDirectoryLocation(BaseModel):
