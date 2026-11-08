@@ -74,6 +74,9 @@ async def connect_to_db() -> None:
         [("business_id", 1), ("user_id", 1), ("location_id", 1)],
         unique=True,
     )
+    await _db.contact_leads.create_index("email")
+    await _db.contact_leads.create_index("created_at")
+    await _db.contact_leads.create_index("ip")
     await _db.business_locations.create_index("business_id")
     await _db.business_locations.create_index("status")
     await _db.business_locations.create_index("services.status")

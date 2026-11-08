@@ -39,6 +39,7 @@ from app.routers import (
     subscriptions,
     businesses,
     geo,
+    contact,
 )
 
 
@@ -110,6 +111,7 @@ app.include_router(notifications.router, prefix=PREFIX)
 app.include_router(subscriptions.router, prefix=PREFIX)
 app.include_router(businesses.router, prefix=PREFIX)
 app.include_router(geo.router, prefix=PREFIX)
+app.include_router(contact.router, prefix=PREFIX)
 
 
 @app.get("/health", tags=["health"])
