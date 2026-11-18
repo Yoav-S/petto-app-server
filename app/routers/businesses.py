@@ -646,6 +646,15 @@ def _public_card_category(doc: dict, branches: list[dict], wanted: str | None) -
     return category if category in CATEGORIES else None
 
 
+def _open_rank(place: BusinessPlace) -> int:
+    """Open first, unknown hours next, closed last."""
+    if place.open_now is True:
+        return 0
+    if place.open_now is None:
+        return 1
+    return 2
+
+
 @router.get("/businesses/nearby", response_model=BusinessPlacePage)
 async def nearby_businesses(
     latitude: float | None = None,
@@ -716,9 +725,9 @@ async def nearby_businesses(
                 )
             )
     if not anywhere and latitude is not None and longitude is not None:
-        places.sort(key=lambda place: (place.distance_km is None, place.distance_km or 0, place.name.lower(), place.address.lower()))
+        places.sort(key=lambda place: (_open_rank(place), place.distance_km is None, place.distance_km or 0, place.name.lower(), place.address.lower()))
     else:
-        places.sort(key=lambda place: (place.name.lower(), place.address.lower()))
+        places.sort(key=lambda place: (_open_rank(place), place.name.lower(), place.address.lower()))
     page = places[offset:offset + limit]
     ratings = await _ratings(db, [place.id for place in page])
     if ratings:
