@@ -745,9 +745,16 @@ async def _place_reviews(
     *,
     limit: int = REVIEW_PAGE_SIZE,
     cursor: str | None = None,
+    hide_blocked: bool = True,
 ) -> list[PlaceReview]:
-    """Newest reviews first. `cursor` is the last id from the previous page."""
+    """Newest reviews first. `cursor` is the last id from the previous page.
+    Reviews by people this user blocked are left out."""
     query: dict = {"business_id": business_id}
+    if hide_blocked and uid:
+        rows = await db.user_blocks.find({"user_id": uid}, {"blocked_uid": 1}).to_list(None)
+        blocked = [row["blocked_uid"] for row in rows if row.get("blocked_uid")]
+        if blocked:
+            query["user_id"] = {"$nin": blocked}
     if cursor and is_valid_object_id(cursor):
         last = await db.business_reviews.find_one({"_id": ObjectId(cursor), "business_id": business_id})
         created_at = last.get("created_at") if last else None
@@ -1043,6 +1050,8 @@ _REPORT_REASON = {
     "offensive": "Offensive or inappropriate",
     "fake": "Fake or misleading",
     "irrelevant": "Irrelevant",
+    "harassment": "User: harassment or bullying",
+    "impersonation": "User: impersonation or fake account",
 }
 
 
@@ -1172,6 +1181,34 @@ async def report_business_review(
     )
     lines.extend(["", f"Report id: {result.inserted_id}"])
     _notify_review_report(lines, f"Ragly: review report — {business_name}")
+
+
+@router.post("/businesses/{business_id}/reviews/{review_id}/block-author", status_code=204)
+async def block_review_author(
+    business_id: str,
+    review_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """Hide every review by this review's author from the current user. The author is not told."""
+    if not ObjectId.is_valid(review_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    review = await db.business_reviews.find_one({"_id": ObjectId(review_id), "business_id": business_id})
+    if not review:
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    uid = current_user["uid"]
+    author_uid = str(review.get("user_id") or "")
+    if not author_uid or author_uid == uid:
+        raise_api_error(403, ErrorCode.UNAUTHORIZED)
+    author = await db.users.find_one({"firebase_uid": author_uid}) or {}
+    await db.user_blocks.update_one(
+        {"user_id": uid, "blocked_uid": author_uid},
+        {
+            "$set": {"blocked_name": docs.text(author.get("name"))},
+            "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+        },
+        upsert=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2340,7 +2377,7 @@ async def admin_list_reviews(
     """Every review on this business, including unpublished listings."""
     _require_admin(current_user)
     await _business_or_404(db, business_id)
-    return await _place_reviews(db, business_id, current_user["uid"], limit=200)
+    return await _place_reviews(db, business_id, current_user["uid"], limit=200, hide_blocked=False)
 
 
 @router.post("/admin/businesses/{business_id}/invitations", response_model=InvitationOut, status_code=201)

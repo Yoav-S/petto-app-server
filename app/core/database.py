@@ -6,8 +6,10 @@ Indexes are created on startup to enforce query performance
 on the most common lookup paths: user_id, pet_id, date.
 """
 import logging
+from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo.errors import OperationFailure
 
 from app.core.config import settings
 from app.core.reminder_series import (
@@ -16,6 +18,11 @@ from app.core.reminder_series import (
 )
 
 logger = logging.getLogger("petto")
+
+# Retention periods stated in the Privacy Policy (section 5.1).
+CONTACT_LEAD_RETENTION_SECONDS = 365 * 24 * 3600
+REPORT_RETENTION_SECONDS = 2 * 365 * 24 * 3600
+VISITOR_HASH_RETENTION_SECONDS = 91 * 24 * 3600  # dashboard range is 90 days
 
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
@@ -75,7 +82,7 @@ async def connect_to_db() -> None:
         unique=True,
     )
     await _db.contact_leads.create_index("email")
-    await _db.contact_leads.create_index("created_at")
+    await _ensure_ttl(_db, "contact_leads", "created_at", CONTACT_LEAD_RETENTION_SECONDS)
     await _db.contact_leads.create_index("ip")
     await _db.business_locations.create_index("business_id")
     await _db.business_locations.create_index("status")
@@ -102,8 +109,25 @@ async def connect_to_db() -> None:
         unique=True,
     )
     await _db.analytics_visitors.create_index("business_id")
+    await _ensure_ttl(_db, "analytics_visitors", "created_at", VISITOR_HASH_RETENTION_SECONDS)
+    cutoff_day = (datetime.now(timezone.utc) - timedelta(seconds=VISITOR_HASH_RETENTION_SECONDS)).date().isoformat()
+    await _db.analytics_visitors.delete_many({"created_at": {"$exists": False}, "day": {"$lt": cutoff_day}})
     await _db.analytics_dedupe.create_index("key", unique=True)
     await _db.analytics_dedupe.create_index("expires_at", expireAfterSeconds=0)
+    await _ensure_ttl(_db, "review_reports", "created_at", REPORT_RETENTION_SECONDS)
+    await _db.user_blocks.create_index([("user_id", 1), ("blocked_uid", 1)], unique=True)
+
+
+async def _ensure_ttl(db, collection: str, field: str, seconds: int) -> None:
+    """Create a TTL index, or convert an existing plain index on the same field."""
+    try:
+        await db[collection].create_index(field, expireAfterSeconds=seconds)
+    except OperationFailure:
+        await db.command(
+            "collMod",
+            collection,
+            index={"keyPattern": {field: 1}, "expireAfterSeconds": seconds},
+        )
 
 
 async def _ensure_reminder_series_date_index(db) -> None:

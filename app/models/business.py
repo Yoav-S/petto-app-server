@@ -594,7 +594,7 @@ class ReviewWrite(BaseModel):
 class ReviewReportWrite(BaseModel):
     """Why this review was reported. The reporter cannot be the author."""
 
-    reason: Literal["spam", "offensive", "fake", "irrelevant"]
+    reason: Literal["spam", "offensive", "fake", "irrelevant", "harassment", "impersonation"]
 
 
 class BusinessPlaceDetail(BusinessPlace):

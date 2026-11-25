@@ -6,8 +6,11 @@ GET  /users/me  — return current user profile
 """
 import logging
 
+from typing import Optional
+
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from datetime import datetime, timezone
 
@@ -340,6 +343,47 @@ async def get_me(
     return _user_to_out(user, has_pets)
 
 
+class BlockedUserOut(BaseModel):
+    id: str
+    name: str = ""
+    photo_url: Optional[str] = None
+
+
+@router.get("/me/blocks", response_model=list[BlockedUserOut])
+async def list_blocked_users(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    """People this user blocked, newest first."""
+    rows = await db.user_blocks.find({"user_id": current_user["uid"]}).sort("created_at", -1).to_list(500)
+    uids = [row["blocked_uid"] for row in rows if row.get("blocked_uid")]
+    people = await db.users.find({"firebase_uid": {"$in": uids}}).to_list(None) if uids else []
+    by_uid = {person.get("firebase_uid"): person for person in people}
+    out: list[BlockedUserOut] = []
+    for row in rows:
+        person = by_uid.get(row.get("blocked_uid")) or {}
+        photo = person.get("photo_url")
+        out.append(
+            BlockedUserOut(
+                id=str(row["_id"]),
+                name=str(person.get("name") or row.get("blocked_name") or ""),
+                photo_url=photo if isinstance(photo, str) and photo.startswith("https://") else None,
+            )
+        )
+    return out
+
+
+@router.delete("/me/blocks/{block_id}", status_code=204)
+async def unblock_user(
+    block_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+):
+    if not ObjectId.is_valid(block_id):
+        raise_api_error(404, ErrorCode.NOT_FOUND)
+    await db.user_blocks.delete_one({"_id": ObjectId(block_id), "user_id": current_user["uid"]})
+
+
 @router.delete("/me", status_code=204)
 async def delete_me(
     current_user: dict = Depends(get_current_user),
@@ -379,6 +423,7 @@ async def delete_me(
     # 2. User-scoped data. Reviews are stored apart from the user document.
     await db.business_reviews.delete_many({"user_id": uid})
     await db.push_tokens.delete_many({"user_id": uid})
+    await db.user_blocks.delete_many({"$or": [{"user_id": uid}, {"blocked_uid": uid}]})
     if email:
         await db.email_otps.delete_many({"email": email})
     await db.users.delete_one({"firebase_uid": uid})

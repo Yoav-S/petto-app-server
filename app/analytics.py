@@ -210,6 +210,7 @@ async def record_event(
                         "location_id": location_id,
                         "day": day,
                         "visitor": visitor,
+                        "created_at": datetime.now(timezone.utc),
                     }
                 )
                 inc["unique_visitors"] = 1
